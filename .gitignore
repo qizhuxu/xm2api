@@ -1,0 +1,11 @@
+# secrets / local runtime
+logs/
+lib/logs/
+*.log
+local-creds.json
+memscan.py
+*.bin
+*.db
+node_modules/
+.DS_Store
+tool-output/

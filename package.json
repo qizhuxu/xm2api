@@ -1,0 +1,13 @@
+{
+  "name": "xm2api",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Local reverse-proxy + OpenAI-compatible facade for Xiaomi MiMo Desktop LLM traffic",
+  "scripts": {
+    "proxy": "node proxy.mjs",
+    "local": "node local-api.mjs",
+    "test": "node test-upstream.mjs",
+    "test:local": "node test-local.mjs"
+  }
+}
