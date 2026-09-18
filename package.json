@@ -15,7 +15,15 @@
     "path2:copy": "powershell -NoProfile -File scripts/path2/copy-cookies.ps1",
     "path2:unwrap": "powershell -NoProfile -File scripts/path2/run-path2.ps1",
     "path2:decrypt": "node scripts/path2/03-decrypt.mjs",
+    "path2:sso": "node scripts/path2/06-sso-servicetoken.mjs --sid mimopc",
+    "path2:sso:probe": "node scripts/path2/06-sso-servicetoken.mjs --probe",
+    "path2:route": "node scripts/path2/07-route-sso.mjs --sid mimopc --quick --model mimo-pro",
+    "path2:merge": "node scripts/path2/08-merge-sso.mjs --sid mimopc",
+    "path2:recon": "node scripts/path2/scan-client.mjs",
+    "path2:asar": "node scripts/path2/asar-extract.mjs",
     "path2:test": "node scripts/path2/04-test-sso-route.mjs",
-    "path2": "powershell -NoProfile -File scripts/path2/run-path2.ps1"
+    "path2:start": "powershell -NoProfile -File scripts/path2/start-path2.ps1",
+    "path2:start:refresh": "powershell -NoProfile -File scripts/path2/start-path2.ps1 -RefreshSso",
+    "path2": "powershell -NoProfile -File scripts/path2/run-path2.ps1 -NoQuit"
   }
 }
