@@ -24,6 +24,8 @@
     "path2:test": "node scripts/path2/04-test-sso-route.mjs",
     "path2:start": "powershell -NoProfile -File scripts/path2/start-path2.ps1",
     "path2:start:refresh": "powershell -NoProfile -File scripts/path2/start-path2.ps1 -RefreshSso",
+    "path2:chat": "node scripts/path2/chat.mjs",
+    "path2:console": "cmd /c path2.bat",
     "path2": "powershell -NoProfile -File scripts/path2/run-path2.ps1 -NoQuit"
   }
 }
