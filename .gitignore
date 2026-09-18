@@ -2,6 +2,7 @@
 logs/
 lib/logs/
 data/
+!data/.gitkeep
 *.log
 local-creds.json
 memscan.py
@@ -10,3 +11,7 @@ memscan.py
 node_modules/
 .DS_Store
 tool-output/
+sso-session.json
+chrome-aes-key.bin
+
+__pycache__/
