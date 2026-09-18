@@ -7,7 +7,9 @@
   "scripts": {
     "proxy": "node proxy.mjs",
     "local": "node local-api.mjs",
+    "ui": "node local-api.mjs",
     "test": "node test-upstream.mjs",
-    "test:local": "node test-local.mjs"
+    "test:local": "node test-local.mjs",
+    "test:ui": "node test-ui.mjs"
   }
 }

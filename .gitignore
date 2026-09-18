@@ -1,6 +1,7 @@
 # secrets / local runtime
 logs/
 lib/logs/
+data/
 *.log
 local-creds.json
 memscan.py
