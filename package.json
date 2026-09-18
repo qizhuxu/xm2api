@@ -12,6 +12,7 @@
     "test:local": "node test-local.mjs",
     "test:ui": "node test-ui.mjs",
     "path2:check": "powershell -NoProfile -File scripts/path2/01-check-client.ps1",
+    "path2:copy": "powershell -NoProfile -File scripts/path2/copy-cookies.ps1",
     "path2:unwrap": "powershell -NoProfile -File scripts/path2/run-path2.ps1",
     "path2:decrypt": "node scripts/path2/03-decrypt.mjs",
     "path2:test": "node scripts/path2/04-test-sso-route.mjs",
