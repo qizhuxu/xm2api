@@ -229,14 +229,24 @@ async function doProbe() {
 }
 
 /**
- * 包一层的 question：stdin 到 EOF / 被 Ctrl+C 关掉时 resolve(null)，
- * 否则 rl.question 的 Promise 永远不落地，顶层 await 会挂住（exit 13）。
+ * 统一的输入源。interactive() 启动时把 readline 的 async 迭代器挂到这里，
+ * 这样 doAsk() 这类模块级动作也能借它读一行，而不用自己再开一个 readline
+ * （同一个 stdin 上开两个 interface 会互相抢输入）。
  */
+let INPUT = null;
 
-function doAsk(rl) {
+/** 写提示并读一行；输入结束返回 null。 */
+async function ask(prompt) {
+  if (!INPUT) return null;
+  process.stdout.write(prompt);
+  const { value, done } = await INPUT.next();
+  return done ? null : String(value);
+}
+
+function doAsk() {
   return new Promise((resolve) => {
     (async () => {
-      const q = await ask(rl, "  输入要问的话（直接回车取消）: ");
+      const q = await ask("  输入要问的话（直接回车取消）: ");
       const text = (q || "").trim();
       if (!text) return resolve();
       if (!(await serverMeta())) {
@@ -348,16 +358,11 @@ async function interactive() {
     terminal: isTty,
   });
   const it = rl[Symbol.asyncIterator]();
+  INPUT = it; // 供 doAsk() 等模块级动作复用同一个输入源
   rl.on("SIGINT", () => {
     console.log("");
     rl.close();
   });
-
-  const ask = async (prompt) => {
-    process.stdout.write(prompt);
-    const { value, done } = await it.next();
-    return done ? null : String(value);
-  };
 
   for (;;) {
     clearScreen();
@@ -375,7 +380,7 @@ async function interactive() {
     } else {
       console.log("");
       try {
-        await action(rl);
+        await action();
       } catch (e) {
         console.log(`  ${bad("❌")} ${e.message}`);
       }
@@ -386,6 +391,7 @@ async function interactive() {
       break;
     }
   }
+  INPUT = null;
   rl.close();
   console.log(dim("  再见"));
 }
