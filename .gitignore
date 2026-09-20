@@ -1,17 +1,34 @@
-# secrets / local runtime
+# ---- 运行期日志 ----
 logs/
-lib/logs/
-data/
-!data/.gitkeep
 *.log
-local-creds.json
-memscan.py
-*.bin
-*.db
-node_modules/
-.DS_Store
-tool-output/
+lib/logs/
+facade/lib/logs/
+
+# ---- 线路2 凭证与数据（全部敏感）----
+path2/data/
+!path2/data/.gitkeep
 sso-session.json
 chrome-aes-key.bin
 
+# ---- 线路3 密钥 ----
+path3/data/
+!path3/data/.gitkeep
+
+# ---- facade 数据 ----
+facade/data/
+
+# ---- 归档区里的中间产物（可重新生成 / 第三方代码）----
+tools/path2/client-src/
+
+# ---- 其它本地状态 ----
+data/
+*.bin
+*.db
+local-creds.json
+memscan.py
+tool-output/
+
+# ---- 通用 ----
+node_modules/
 __pycache__/
+.DS_Store
