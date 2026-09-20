@@ -1,0 +1,19 @@
+{
+  "_comment": "MiMo 凭证样例。放到 CLIProxyAPI 的 auth-dir 下，文件名任意（这里用 mimo.json）。",
+  "_warning": "pass_token 是长期凭证，等同于账号密码，切勿提交到仓库或贴给别人。",
+
+  "type": "mimo",
+
+  "user_id": "1000000001",
+  "pass_token": "从 MiMo 桌面端 Chromium Cookies 库取出的 passToken",
+  "c_user_id": "可选的 cUserId，有就填，能提高换 token 的成功率",
+
+  "sid": "mimopc",
+
+  "_notes": [
+    "只写 pass_token + user_id 即可：插件会在 auth.parse 阶段换一次 service_token，之后由宿主按 refresh_after 定时续期。",
+    "也可以只写 service_token + user_id（短期凭证，不会自动续期）。",
+    "还可以写成 {\"type\":\"mimo\",\"cookie\":\"serviceToken=...; userId=...\"} 直接复用 xm2api 的 sso-session.json。",
+    "用 xm2api 仓库里的 `node creds.mjs` 可以把这三个值导出来。"
+  ]
+}

@@ -11,3 +11,9 @@ node_modules/
 __pycache__/
 *.log
 .DS_Store
+
+# CPA 插件构建产物（不提交二进制，用 make package 重新生成）
+cpa-plugin/dist/
+cpa-plugin/*.so
+cpa-plugin/*.dll
+cpa-plugin/*.dylib
