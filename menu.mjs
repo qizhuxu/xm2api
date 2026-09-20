@@ -329,10 +329,14 @@ const ACTIONS = {
  *   - 迭代器在 stdin 结束时干净地返回 done，不会留下不落地的 Promise。
  */
 async function interactive() {
+  const isTty = process.stdin.isTTY === true;
+  if (!isTty) {
+    console.log(warn("  提示：stdin 不是终端（管道/重定向）。菜单只消费已喂入的行，用完即退出。"));
+  }
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
-    terminal: process.stdin.isTTY === true,
+    terminal: isTty,
   });
   const it = rl[Symbol.asyncIterator]();
   rl.on("SIGINT", () => {
@@ -349,7 +353,10 @@ async function interactive() {
   for (;;) {
     await printHeader();
     const answer = await ask("  选择: ");
-    if (answer === null) break; // stdin 结束
+    if (answer === null) {
+      console.log(warn("  （输入结束，退出）"));
+      break;
+    }
     const key = answer.trim();
     if (key === "0" || key.toLowerCase() === "q") break;
     const action = ACTIONS[key];
@@ -364,7 +371,10 @@ async function interactive() {
       }
     }
     const pause = await ask(dim("\n  回车返回菜单…"));
-    if (pause === null) break;
+    if (pause === null) {
+      console.log(warn("  （输入结束，退出）"));
+      break;
+    }
   }
   rl.close();
   console.log(dim("  再见"));

@@ -1,11 +1,23 @@
 @echo off
-rem xm2api 控制台入口（双击即可）。逻辑都在 menu.mjs 里，这里只做转发。
 cd /d "%~dp0"
+title xm2api console
+
 where node >nul 2>nul
-if errorlevel 1 (
-  echo [xm2api] 找不到 node，请先安装 Node ^>= 22 或把 node 加进 PATH。
-  pause
-  exit /b 1
-)
+if errorlevel 1 goto nonode
+
 node menu.mjs %*
-if errorlevel 1 pause
+set "CODE=%ERRORLEVEL%"
+
+echo.
+if not "%CODE%"=="0" echo [xm2api] menu exited with code %CODE%
+echo Press any key to close this window . . .
+pause >nul
+exit /b %CODE%
+
+:nonode
+echo.
+echo [xm2api] ERROR: node not found.
+echo            Install Node 22 or newer, or add node to PATH.
+echo.
+pause
+exit /b 1

@@ -1,0 +1,12 @@
+# cmd.exe 解析 .bat 需要 CRLF —— 少了这一步，签出时可能变成 LF，
+# 导致 if/for 多行块解析错乱（表现为"双击闪一下就没了"）。
+*.bat text eol=crlf
+
+# 其它源码统一 LF
+*.mjs   text eol=lf
+*.py    text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
