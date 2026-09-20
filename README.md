@@ -401,6 +401,7 @@ requirements.txt        examples 的可选依赖（openai + PyYAML）
 docs/getting-started.md 上手教程 + 报错对照表
 docs/architecture.md    架构与数据流详解
 docs/tools-and-search.md 工具调用 / 联网搜索实测矩阵 + 踩坑
+cpa-plugin/             CLIProxyAPI 原生插件（线路2 的另一条走法，见下）
 data/                   ⚠️ 凭证（gitignored）
 logs/                   ⚠️ 抓包日志（gitignored）
 ```
@@ -408,6 +409,27 @@ logs/                   ⚠️ 抓包日志（gitignored）
 `logs/path2-capture-<日期>.jsonl` 每请求一行：状态码、耗时、`x-trace-id`、
 脱敏请求头、`injected`、`rewrites`、请求/响应体（各上限 20KB）。
 排查问题和向小米上报 `x-trace-id` 时用得上；注意它**完整记录对话内容**。
+
+---
+
+## 另一条走法：CLIProxyAPI 插件
+
+`cpa-plugin/` 是本项目的 **CLIProxyAPI 原生插件**（Go + cgo 编译成 `mimo.dll`）。
+它把整条链路搬进了 CLIProxyAPI 进程内，**不需要再跑这个 Node 反代**：
+
+| | 本仓库的 Node 反代 | `cpa-plugin/` |
+|---|---|---|
+| 进程 | 独立进程，监听 18787 | 无（跑在 CPA 进程内） |
+| 端点数 | 7 个模型 + 图像 + TTS/ASR | 7 个模型 + TTS/ASR（**无图像**） |
+| 凭证 | 读客户端 Chromium Cookies 库 | `mimo.json`（`passToken`，自动续期） |
+| 客户端 | 任何 OpenAI 兼容客户端 | 额外白送 Claude Code / Codex / Gemini 客户端 |
+
+什么时候用哪个：
+
+- 想给 Cherry Studio 之类**普通客户端**用 → 本 Node 反代更简单，图像也能用。
+- 已经在用 **CLIProxyAPI** 统一管多个上游 → 装插件，少一个进程、少一份凭证副本。
+
+详细的编译、部署、能力矩阵和开发踩坑见 [`cpa-plugin/README.md`](cpa-plugin/README.md)。
 
 ---
 

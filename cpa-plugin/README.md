@@ -225,6 +225,25 @@ CPA 内部对 JSON 字段命名不统一：`sdk/pluginapi` 里多数结构体没
 
 只有下游推送（`host.stream.emit` / `host.stream.close`）和日志用宿主回调 —— 那是结构性必需的。
 
+### 5.9 客户端断开后 CPA 仍会把流读完
+
+实测：客户端 2 秒后强制断开，插件侧的推送 goroutine 继续跑了 **8.1 秒**、推了 **534 个 chunk / 154 KB** 才自然结束（EOF）。
+
+```
+01:43:44.493 <- executor.execute_stream (504ms)     ← 上游响应头到手，同步部分返回
+01:43:52.634 pumpStream 退出 stream=2 chunks=534 bytes=154577
+```
+
+这不是泄漏，也不是 bug：CPA 在客户端离开后**继续 drain** stream bridge（大概率是为了把 usage/计费统计完整记下来），所以 `host.stream.emit` 一直成功，我就一直推，直到上游 EOF。
+
+两件事值得知道：
+
+- 插件的 goroutine 一定会退出 —— 要么上游 EOF，要么宿主 abort 后 `emit` 立刻返回 `errStreamBridgeClosed`（见 `stream_bridge.go` 里 `emit` 对 `s.closed` 的 select）。
+- 兜底：上游请求挂着 `client.Timeout = 300s`，即使出现「宿主既不 abort 也不 drain」的理论情况，读也会在 5 分钟内报错结束，不会永久挂住。
+
+如果想省上游算力，只能在 CPA 侧限制，插件无法感知客户端断开（只能从 `emit` 的返回值反推）。
+
+
 ## 6. 源码结构
 
 | 文件 | 作用 |

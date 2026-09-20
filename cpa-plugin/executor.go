@@ -242,11 +242,17 @@ func handleExecuteStream(req []byte) []byte {
 // `[DONE]` 丢弃 —— CPA 自己会补终止帧。
 func pumpStream(streamID string, res *http.Response) {
 	defer res.Body.Close()
+
+	var chunks, emitted int
 	defer func() {
 		if r := recover(); r != nil {
 			hostLog("error", fmt.Sprintf("MiMo 流式推送 panic: %v", r))
+			dbg("pumpStream panic stream=%s: %v", streamID, r)
 			hostStreamClose(streamID, fmt.Sprintf("plugin panic: %v", r))
+			return
 		}
+		// 退出路径也要留痕：客户端断开时靠这条判断 goroutine 有没有正确收尾
+		dbg("pumpStream 退出 stream=%s chunks=%d bytes=%d", streamID, chunks, emitted)
 	}()
 
 	reader := bufio.NewReaderSize(res.Body, 32*1024)
@@ -259,9 +265,14 @@ func pumpStream(streamID string, res *http.Response) {
 			return true
 		}
 		if e := hostStreamEmit(streamID, payload); e != nil {
+			// 宿主在 stream abort 后会立刻返回错误（stream_bridge.go 的 s.closed），
+			// 这里返回即可让上游 body 被 defer 关掉，不会泄漏连接。
 			hostLog("debug", "MiMo 流式推送中断（下游可能已断开）: "+e.Error())
+			dbg("pumpStream 推送中断: %v", e)
 			return false
 		}
+		chunks++
+		emitted += len(payload)
 		return true
 	}
 
