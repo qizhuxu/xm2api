@@ -258,6 +258,60 @@ function onUnmatched(req, res, pathname) {
   return true;
 }
 
+/* ------------------------------------------------ 本机停止接口 */
+
+/**
+ * POST /__xm2api/shutdown —— 只接受本机回环地址。
+ *
+ * 为什么要有它：菜单原先只靠 logs/server.pid 去 kill，pid 文件一旦过期或缺失
+ * （服务是用别的方式启动的、或文件被别的实例覆盖过）就完全停不掉。
+ * 有这条接口之后，不管服务是谁启的（菜单 / npm run serve / 手动 node server.mjs），
+ * 只要能连上就能让它自己干净退出 —— 不再依赖 pid 文件。
+ */
+const PID_FILE = path.join(PROJECT_ROOT, "logs", "server.pid");
+
+/** 只删自己写的那个 pid 文件，别把别的实例的删了 */
+function clearOwnPidFile() {
+  try {
+    if (Number(fs.readFileSync(PID_FILE, "utf8").trim()) === process.pid) fs.rmSync(PID_FILE, { force: true });
+  } catch {}
+}
+
+async function shutdown(reason) {
+  console.log(`[shutdown] ${reason}，正在关闭…`);
+  await routeServer.close();
+  clearOwnPidFile();
+  console.log("[shutdown] 已停止");
+  process.exit(0);
+}
+
+function isLoopback(req) {
+  const ra = String(req.socket.remoteAddress || "");
+  return ra === "127.0.0.1" || ra === "::1" || ra === "::ffff:127.0.0.1";
+}
+
+const SHUTDOWN_ROUTE = {
+  method: "POST",
+  path: "/__xm2api/shutdown",
+  handler: (req, res) => {
+    if (!isLoopback(req)) {
+      sendJson(res, 403, { error: { message: `只接受本机请求（来自 ${req.socket.remoteAddress}）`, type: "invalid_request_error" } });
+      return;
+    }
+    // 带 Origin 的一定是浏览器发的。本机网页也能 POST 到 127.0.0.1，
+    // 不加这道判断，随便一个网页就能把你的反代关掉。
+    if (req.headers.origin) {
+      sendJson(res, 403, {
+        error: { message: `拒绝来自浏览器的停止请求（Origin: ${req.headers.origin}）`, type: "invalid_request_error" },
+      });
+      return;
+    }
+    sendJson(res, 200, { ok: true, stopping: true, port: PORT });
+    // 留 200ms 让客户端先把响应读走，再动连接
+    setTimeout(() => shutdown("收到本机停止请求"), 200);
+  },
+};
+
 /* ------------------------------------------------ 服务 */
 
 const routeServer = createRouteServer({
@@ -273,6 +327,7 @@ const routeServer = createRouteServer({
   transform: webSearchCompat,
   onUnmatched,
   local: [
+    SHUTDOWN_ROUTE,
     {
       method: "GET",
       path: "/v1/models",
@@ -353,6 +408,7 @@ const routeServer = createRouteServer({
         `Meta:              http://127.0.0.1:${PORT}/__xm2api`,
         `联网搜索:          请求体加 "web_search": true，或 tools:[{type:"web_search"}]`,
         `工具调用:          tools + tool_choice，用法与 OpenAI 一致`,
+        `停止服务:          POST http://127.0.0.1:${PORT}/__xm2api/shutdown（仅本机）`,
         "401 → 刷新凭证:     npm run refresh",
         "改端口/日志/兼容层：编辑 config.yaml",
       ],
@@ -365,5 +421,14 @@ listen(routeServer, {
     console.log(`logs → ${LOG_DIR}`);
     console.log(`meta → http://${HOST}:${PORT}/__xm2api`);
     console.log(`data → ${path.join(PROJECT_ROOT, "data")}`);
+    console.log(`stop → POST http://${HOST}:${PORT}/__xm2api/shutdown （或菜单选 2）`);
   },
 });
+
+// 前台运行时 Ctrl+C / 被 kill 也走同一条清理路径，别留下过期 pid 文件。
+// 注意 pid 文件是菜单写的（写的是本进程 pid），所以这里只删属于自己的那份。
+for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  process.on(sig, () => {
+    shutdown(`收到 ${sig}`);
+  });
+}

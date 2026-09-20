@@ -101,6 +101,9 @@ OpenAI SDK ──POST /v1/chat/completions──► 127.0.0.1:18787
 | `server.mjs:163` | `resolveModels()` | 目录缓存（5 分钟）+ 上游失败回落 | 5 分钟缓存 |
 | `server.mjs:199` | `webSearchCompat()` | **兼容层**：`web_search` 键 → `tools` 声明 | 无 |
 | `server.mjs:238` | `SUPPORTED` / `onUnmatched()` | 未匹配路径的 404 + 可用端点清单 | 无 |
+| `server.mjs:271` | `PID_FILE` / `clearOwnPidFile()` | 只清属于自己的 pid 文件 | 无 |
+| `server.mjs:280` | `shutdown()` | 关连接 → 清 pid → 退出（`SIGINT/SIGTERM` 也走它） | 无 |
+| `server.mjs:293` | `SHUTDOWN_ROUTE` | `POST /__xm2api/shutdown`：只认回环 + 拒绝 `Origin` | 无 |
 | `upstream.mjs:21` | `pickRoute()` | 路由匹配，首个命中即返回 | 无 |
 | `upstream.mjs:28` | `redactHeaders()` | 日志脱敏（`cookie`/`authorization`/`x-api-key`/`set-cookie` 只留前 8 位） | 无 |
 | `upstream.mjs:42` | `sendJson()` | 本地 JSON 响应 | 无 |
@@ -108,7 +111,8 @@ OpenAI SDK ──POST /v1/chat/completions──► 127.0.0.1:18787
 | `upstream.mjs:88` | `logEntry()` | 追加一行 JSON，同一份打到 stdout | 无 |
 | `upstream.mjs:103` | `forward()` | 转发核心（含 transform 钩子、SSE 透传、日志） | 无 |
 | `upstream.mjs:280` | 请求处理器 | CORS / OPTIONS / local / meta / 收 body | 无 |
-| `upstream.mjs:311` | `listen()` | 绑定端口 | 无 |
+| `upstream.mjs:313` | `close()` | 优雅关闭：销毁 agent → 掐连接 → 等 `server.close` 回调 | 无 |
+| `upstream.mjs:329` | `listen()` | 绑定端口 | 无 |
 
 **中间层是无状态转发器**：没有会话池、对话历史、缓存、重试队列、定时器。
 唯一的"记忆"是磁盘上的 `data/sso-session.json`，且每请求重读。
@@ -205,6 +209,28 @@ up.on('timeout') → up.destroy() → 'error' → 502 + {"error":"upstream_error
 creds.mjs  负责"拿到有效凭证"（离线、可反复跑、失败可重试）
 server.mjs  负责"每请求带上它"（在线、无状态、不失败重试）
 ```
+
+**停止服务**（`POST /__xm2api/shutdown`）
+
+端口上的服务可以自己退出，菜单的「停止」优先走这条路：
+
+```
+menu.mjs  ──POST /__xm2api/shutdown──►  server.mjs
+                                          routeServer.close()   掐掉所有连接（含 SSE 长连接）
+                                          清掉属于自己的 server.pid
+                                          process.exit(0)
+```
+
+三道门：
+
+1. `remoteAddress` 必须是回环（`127.0.0.1` / `::1` / `::ffff:127.0.0.1`）
+2. **带 `Origin` 头的直接 403** —— 本机网页也能 POST 到 127.0.0.1，
+   没这道判断，随便打开一个网页就能把你的反代关掉（CSRF）
+3. 只删 pid 文件里**等于自己 pid** 的那份，不会误清别的实例
+
+有了它，`doStop()` 就不必再假设"服务一定是本菜单启动的"：
+先请求它自己退（10 秒），失败再退回 pid + kill（8 秒），最后用"端口还响不响应"
+判定结果 —— 全程不做推断。pid 文件从"唯一依据"降级成"兜底线索"。
 
 ---
 

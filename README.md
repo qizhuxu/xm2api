@@ -24,6 +24,7 @@ npm run menu           # 交互式控制台（或双击 start.bat）
    3  重启              4  状态 / 最近请求
    5  刷新凭证          6  健康检查
    7  试问一句          8  查看抓包日志
+   9  能力自检（工具调用 / 联网搜索）
    0  退出
 ```
 
@@ -34,8 +35,14 @@ npm start              # 后台启动（日志进 logs/server-stdout.log）
 npm stop
 npm status
 npm run probe          # 健康检查
+npm run caps           # 工具调用 / 联网搜索自检
 npm run serve          # 前台启动，Ctrl+C 停止（调试用）
 ```
+
+> **「停止服务」不依赖 pid 文件**：它先让服务自己退
+> （`POST /__xm2api/shutdown`，只认本机、拒绝带 `Origin` 的浏览器请求），
+> 失败才退回 pid + kill。所以哪怕服务是 `npm run serve` 启的、或者 pid 文件被删了，
+> 菜单选 2 一样能停干净。端口上如果是**别的**程序，它会明确报出来并且**不会去动**。
 
 > 第一次用？看逐步教程 **[docs/getting-started.md](docs/getting-started.md)**。
 
@@ -85,6 +92,7 @@ print(json.load(urllib.request.urlopen(req))["choices"][0]["message"]["content"]
 | `GET /v1/models` | **从上游 `/api/model/list` 实时拉取**（缓存 5 分钟，带 `capabilities` / `price`） |
 | `GET /v1/models/{id}` | 单个模型；不存在时 404 并列出全部可用 id |
 | `GET /__xm2api` | 自检 JSON：凭证、上游、模型来源、**实测能力表** |
+| `POST /__xm2api/shutdown` | 让服务自己退出（**仅本机**，拒绝带 `Origin` 的浏览器请求） |
 
 未知路径返回 404 时会附上可用端点清单，不会只丢一句 `no route`。
 
@@ -412,6 +420,23 @@ XM2API_PORT=18790 npm run serve
 
 **`--refresh` 报 EBUSY / WinError 32**
 cookie 库被客户端独占。完全退出 Xiaomi MiMo（含任务栏托盘）后重试。
+
+**菜单选「2 停止服务」报「仍在响应」**
+老版本的停止逻辑只信 `logs/server.pid`，文件过期就停不掉。现在改成先调
+`POST /__xm2api/shutdown` 让服务自己退，pid 只作兜底 —— 请**重开一次菜单**
+（`npm run menu`）拿到新逻辑。如果服务是旧版本起的、没有这条接口，
+菜单会自动退回 pid + kill 并打印实际占用端口的排查命令。
+
+**菜单说「端口 18787 被别的程序占用」**
+反代没起来，端口被别人占了。菜单会打印 `Get-NetTCPConnection` 的查询命令；
+也可以换个端口：`XM2API_PORT=18790 npm run serve`。
+
+**服务停不掉 / 想知道谁占着 18787**
+```powershell
+Get-NetTCPConnection -LocalPort 18787 -State Listen | Select OwningProcess
+# 或
+netstat -ano | findstr :18787
+```
 
 **能不能放到服务器上跑 / 不开这台电脑**
 可以。实测凭证**不绑 IP**（换境外出口仍 200）。但要先给服务加鉴权——见下方安全第 1 条。

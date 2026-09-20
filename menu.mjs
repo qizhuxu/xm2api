@@ -10,9 +10,13 @@
  *   node menu.mjs probe          健康检查
  *   node menu.mjs caps           能力自检（工具调用 / 流式分片 / 联网搜索）
  *
+ * 停止服务不依赖 pid 文件：先 POST /__xm2api/shutdown 让服务自己退，
+ * 失败才退回 logs/server.pid + kill（服务可能是 npm run serve 启的，那样没有 pid 文件）。
+ *
  * 也可以双击 start.bat（它只是本脚本的入口）。
  */
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import readline from "node:readline";
 import { spawn } from "node:child_process";
@@ -60,6 +64,58 @@ function readPid() {
   }
 }
 
+function clearPidFile() {
+  fs.rmSync(PID_FILE, { force: true });
+}
+
+/** 端口上是谁：ours（我们的服务）/ other（别的程序）/ closed（没人监听） */
+async function portState(timeoutMs = 2000) {
+  const meta = await serverMeta(timeoutMs);
+  if (meta) return { state: "ours", meta };
+  const detail = await new Promise((resolve) => {
+    const sock = net.connect({ host: HOST, port: PORT });
+    const done = (v) => {
+      try {
+        sock.destroy();
+      } catch {}
+      resolve(v);
+    };
+    sock.setTimeout(timeoutMs, () => done("timeout"));
+    sock.on("connect", () => done("open"));
+    sock.on("error", (e) => done(e.code === "ECONNREFUSED" ? "refused" : `error:${e.code}`));
+  });
+  return { state: detail === "refused" ? "closed" : "other", detail };
+}
+
+/** 等端口彻底不再响应我们的 meta；返回是否已停干净 */
+async function waitGone(maxMs) {
+  const until = Date.now() + maxMs;
+  while (Date.now() < until) {
+    await new Promise((r) => setTimeout(r, 250));
+    if (!(await serverMeta(600))) return true;
+  }
+  return false;
+}
+
+/** 让服务自己退出 —— 不需要 pid 文件，谁启的都能停 */
+async function requestShutdown() {
+  try {
+    const r = await fetch(`${META_URL}/shutdown`, { method: "POST", signal: AbortSignal.timeout(3000) });
+    return r.ok;
+  } catch {
+    // 服务可能在回完响应后立刻断开连接，这不算失败，交给 waitGone 判定
+    return null;
+  }
+}
+
+function portOwnerHint() {
+  return (
+    `    查占用者：Get-NetTCPConnection -LocalPort ${PORT} -State Listen | Select OwningProcess\n` +
+    `    或：      netstat -ano | findstr :${PORT}\n` +
+    `    查到 pid：Stop-Process -Id <pid> -Force`
+  );
+}
+
 /** 今天那份抓包日志的最后 n 行（只读，不改） */
 function lastCaptureLines(n = 5) {
   const file = path.join(config.logging.dir, `path2-capture-${new Date().toISOString().slice(0, 10)}.jsonl`);
@@ -74,12 +130,21 @@ function lastCaptureLines(n = 5) {
 /* ------------------------------------------------------------------ 动作 */
 
 async function doStart() {
-  if (await serverMeta()) {
+  const port = await portState();
+  if (port.state === "ours") {
     console.log(`  ${warn("服务已在运行")} ${META_URL}`);
     const pid = readPid();
     if (pid) console.log(dim(`  pid=${pid}`));
+    else console.log(dim("  （pid 文件不是本脚本写的，停止请用菜单选 2 —— 它会走服务自带的停止接口）"));
     return true;
   }
+  if (port.state === "other") {
+    console.log(`  ${bad(`❌ 端口 ${PORT} 被别的程序占用`)}（探测结果：${port.detail}）`);
+    console.log(dim(portOwnerHint()));
+    console.log(dim(`    或改端口：XM2API_PORT=18790 npm run serve`));
+    return false;
+  }
+
   fs.mkdirSync(path.dirname(PID_FILE), { recursive: true });
   const out = fs.openSync(STDOUT_LOG, "a");
   const err = fs.openSync(STDERR_LOG, "a");
@@ -103,6 +168,7 @@ async function doStart() {
     process.stdout.write(".");
   }
   console.log(`\r  ${bad("❌ 15 秒内没起来")}`);
+  clearPidFile();
   try {
     const tail = fs.readFileSync(STDERR_LOG, "utf8").trim().split(/\r?\n/).slice(-6);
     if (tail.length) for (const l of tail) console.log(dim(`  ${l}`));
@@ -110,32 +176,65 @@ async function doStart() {
   return false;
 }
 
+/**
+ * 停止服务。
+ *
+ * 两步走，因为 pid 文件不可靠（服务可能是 npm run serve 启的、pid 文件可能过期
+ * 或被别的实例覆盖过 —— 只信它就会出现"明明在跑却停不掉"）：
+ *   ① 先让服务自己退：POST /__xm2api/shutdown（旧版本没这条接口，会失败）
+ *   ② 再退回 pid 文件 + kill
+ * 最后用端口是否还在响应来判定，不靠任何推断。
+ */
 async function doStop() {
-  const alive = await serverMeta();
+  const port = await portState();
   const pid = readPid();
-  if (!alive && !pid) {
+
+  if (port.state === "closed" && !pid) {
     console.log(`  ${warn("服务没在运行")}`);
+    clearPidFile();
     return true;
   }
-  if (pid) {
+  if (port.state === "other") {
+    console.log(`  ${bad(`❌ 端口 ${PORT} 上不是本服务`)}（探测结果：${port.detail}）—— 不会去动它`);
+    console.log(dim(portOwnerHint()));
+    return false;
+  }
+
+  // ① 优雅停止：不依赖 pid 文件
+  if (port.state === "ours") {
+    const sent = await requestShutdown();
+    if (sent === false) {
+      console.log(dim("  服务自带停止接口返回失败（版本较旧？），改用 pid"));
+    } else {
+      console.log(dim("  已请求服务自行退出（POST /__xm2api/shutdown）"));
+      if (await waitGone(10000)) {
+        clearPidFile();
+        console.log(`  ${ok("✅ 已停止")}  端口 ${PORT} 已释放`);
+        return true;
+      }
+      console.log(dim("  10 秒没退干净，退回 pid"));
+    }
+  }
+
+  // ② pid 兜底
+  if (pid && pid !== process.pid) {
     try {
       process.kill(pid);
       console.log(dim(`  已向 pid=${pid} 发送终止信号`));
     } catch (e) {
       console.log(dim(`  kill(${pid}) 失败：${e.message}`));
     }
-  }
-  for (let i = 0; i < 20; i++) {
-    await new Promise((r) => setTimeout(r, 200));
-    if (!(await serverMeta(600))) {
-      fs.rmSync(PID_FILE, { force: true });
+    if (await waitGone(8000)) {
+      clearPidFile();
       console.log(`  ${ok("✅ 已停止")}  端口 ${PORT} 已释放`);
       return true;
     }
+  } else if (!pid) {
+    console.log(dim("  pid 文件里没有可用的 pid（服务不是本脚本启动的）"));
   }
-  console.log(`  ${bad("❌ 仍在响应")} —— 可能不是本脚本启动的进程`);
-  if (pid) console.log(dim(`  可手动：taskkill /PID ${pid} /F`));
-  else console.log(dim(`  端口占用者不是本脚本记录的 pid，可用 netstat -ano | findstr :${PORT} 查`));
+
+  console.log(`  ${bad("❌ 仍在响应")}  ${META_URL}`);
+  console.log(dim(portOwnerHint()));
   return false;
 }
 
@@ -161,10 +260,13 @@ async function doStatus() {
 
   console.log(c("cyan", "  服务"));
   if (meta) {
-    console.log(`    状态      : ${ok("✅ 运行中")}${pid ? dim(`  pid=${pid}`) : ""}`);
+    console.log(`    状态      : ${ok("✅ 运行中")}${pid ? dim(`  pid=${pid}`) : dim("  pid 未知（不是本脚本启动的）")}`);
     console.log(`    服务侧凭证: present=${meta.credentials?.present} sid=${meta.credentials?.sid ?? "-"}`);
   } else {
-    console.log(`    状态      : ${bad("❌ 未运行")}`);
+    const port = await portState();
+    console.log(
+      `    状态      : ${port.state === "other" ? bad(`❌ 端口 ${PORT} 被别的程序占用（${port.detail}）`) : bad("❌ 未运行")}`
+    );
   }
 
   console.log(c("cyan", "  凭证"));
@@ -430,13 +532,19 @@ function clearScreen() {
 }
 
 async function printHeader() {
-  const meta = await serverMeta(1200);
+  const port = await portState(1200);
   const creds = credentialsStatus();
+  const svc =
+    port.state === "ours"
+      ? ok(`运行中 http://${HOST}:${PORT}`)
+      : port.state === "other"
+        ? bad(`端口 ${PORT} 被别的程序占用（${port.detail}）`)
+        : bad("已停止");
   console.log("");
   console.log(c("cyan", "  ╔══════════════════════════════════════════╗"));
   console.log(c("cyan", "  ║        xm2api 线路2 反代  控制台         ║"));
   console.log(c("cyan", "  ╚══════════════════════════════════════════╝"));
-  console.log(`   服务 : ${meta ? ok(`运行中 http://${HOST}:${PORT}`) : bad("已停止")}`);
+  console.log(`   服务 : ${svc}`);
   console.log(`   凭证 : ${creds.hasRouteCookie ? ok("就绪") : bad("缺失")}${creds.sid ? dim(`  sid=${creds.sid}`) : ""}`);
   console.log(`   配置 : ${dim(path.relative(ROOT, CONFIG_PATH))}`);
   console.log("");
