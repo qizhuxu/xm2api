@@ -194,9 +194,9 @@ async function resolveModels() {
  *
  * 两档，都由 config.yaml 控制：
  *   webSearchFlag（默认开）—— 请求里出现 `web_search` 键时才翻译
- *   webSearchAuto（默认关）—— 请求里没提也注入裸工具，由模型自己决定搜不搜
+ *   webSearchAuto（默认开）—— 纯聊天请求（没自带 tools）注入裸工具，模型自己决定搜不搜
  *
- * 不满足条件就返回 null，请求体逐字节透传（这是默认情况）。
+ * 不满足条件就返回 null，请求体逐字节透传。
  */
 const SEARCH_TOOL_KEYS = ["max_keyword", "force_search", "limit"];
 
@@ -230,7 +230,15 @@ function webSearchCompat(bodyBuf, { pathname }) {
 
   const hasKey = Object.prototype.hasOwnProperty.call(j, "web_search");
   if (!hasKey && !webSearchAuto) return null; // 默认路径：一个字都不改
-  if (!hasKey && !autoSearchAllowed(j.model)) return null; // TTS/ASR 别塞搜索工具
+  if (!hasKey) {
+    // auto 档的两条边界：
+    //  ① 调用方自带 tools（函数调用/agent 场景）→ 不插手。
+    //     实测塞进去的 web_search 会跟调用方的函数抢："上海天气如何？"模型会
+    //     改去联网而不调 get_weather。要不要搜索交给调用方自己决定。
+    //  ② TTS/ASR 也走 chat/completions → 不能塞工具
+    if (Array.isArray(j.tools) && j.tools.length) return null;
+    if (!autoSearchAllowed(j.model)) return null;
+  }
 
   const ws = hasKey ? j.web_search : undefined;
   if (hasKey) delete j.web_search;
@@ -419,12 +427,14 @@ const routeServer = createRouteServer({
         web_search: {
           native: 'tools: [{type:"web_search"}]  →  message.annotations[] + usage.web_search_usage',
           tool_options: { max_keyword: "改写关键词条数", force_search: "提高搜索概率（不是强制）", limit: "参考网页条数" },
-          default_behavior: "反代默认不主动联网：请求里没提 web_search 就一个字都不改",
+          default_behavior: config.server.compat.webSearchAuto
+            ? "反代默认给不带 tools 的 TEXT 聊天请求注入 web_search 工具，由模型自己决定搜不搜（想纯透传就把 webSearchAuto 关掉）"
+            : "反代默认不主动联网：请求里没提 web_search 就一个字都不改",
           compat_flag: config.server.compat.webSearchFlag
             ? '接受非标准 web_search: true / {max_keyword,force_search,limit}，由反代翻译成工具声明'
             : "翻译已关闭（config.yaml → server.compat.webSearchFlag）",
           compat_auto: config.server.compat.webSearchAuto
-            ? "已开启：每个 TEXT 聊天请求都注入裸 tools:[{type:\"web_search\"}]，模型自己决定搜不搜"
+            ? '已开启（默认）：不带 tools 的 TEXT 聊天请求会注入裸 tools:[{type:"web_search"}]；自带工具（函数调用）的请求不碰'
             : "未开启（config.yaml → server.compat.webSearchAuto）—— 需要每个请求都带搜索能力时再打开",
         },
         vision: "content[].type=image_url（data: 或 http(s) 均可）",

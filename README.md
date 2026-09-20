@@ -131,10 +131,24 @@ print(json.load(urllib.request.urlopen(req))["choices"][0]["message"]["content"]
 {"web_search": false}                              # → 本次不联网
 ```
 
-**联网默认不会自动发生** —— 不写 `web_search` 的请求反代一个字都不改。
-想让每个请求都带上搜索能力（模型自己决定搜不搜），把 `server.compat.webSearchAuto`
-打开即可；实测普通问题不加钱不加时延（`prompt_tokens` 不变），时效性问题才去搜。
-三种模式的对照表见 **[docs/tools-and-search.md](docs/tools-and-search.md)** 第 5 节。
+**联网默认是开着的（auto 档）** —— 反代给不带 `tools` 的 TEXT 聊天请求补上搜索工具，
+**搜不搜交给模型判断**：问「今天有什么新闻」它自己去搜（回 25 条带 URL 的引用），
+问「1+1=?」「什么是 TCP」不搜（`prompt_tokens` 13、耗时 ~1 秒，和不加工具一模一样）。
+
+```python
+# 你什么都不用写。也可以显式控制：
+{"web_search": true}                               # 明确要求联网（force_search/limit 可选）
+{"web_search": {"limit": 5, "force_search": true}} # 带参数的搜索工具
+{"web_search": false}                              # 本次别联网
+```
+
+> ⚠️ 开了 auto，**不带 tools 的聊天请求 body 会被改写**（追加一个 `tools` 条目），
+> 不再是逐字节透传。想要纯净透传：`server.compat.webSearchAuto: false`，
+> 那时只有你显式写 `web_search` 才会联网。
+>
+> **自带 `tools` 的请求（函数调用 / agent）反代一概不碰** —— 这是踩出来的坑：
+> 无脑追加会让模型改去联网、不调你自己的函数。那种场景要联网就显式写 `web_search: true`。
+> 三种模式的对照表见 **[docs/tools-and-search.md](docs/tools-and-search.md)** 第 5 节。
 
 > ⚠️ `web_search: {enable:true}` / `enable_search:true` / `search:{...}` 这类写法上游是
 > **静默忽略**的：不报错，但模型会一本正经地回答"我没有联网能力"。
@@ -251,7 +265,7 @@ print(r["data"][0]["url"])        # 签名 URL，X-Tos-Expires=86400（24 小时
 | `XM2API_SID` | `credentials.sid` | SSO 的 sid |
 | `XM2API_UPSTREAM_TIMEOUT_MS` | `server.upstreamTimeoutMs` | 上游空闲超时 |
 | `XM2API_COMPAT_WEBSEARCH` | `server.compat.webSearchFlag` | `0` 关掉 web_search 翻译 |
-| `XM2API_COMPAT_WEBSEARCH_AUTO` | `server.compat.webSearchAuto` | `1` 每个请求都注入搜索工具 |
+| `XM2API_COMPAT_WEBSEARCH_AUTO` | `server.compat.webSearchAuto` | `0` 关掉自动注入（回到纯透传） |
 | `XM2API_MODELS_TTL_MS` | — | `/v1/models` 缓存时长（默认 5 分钟） |
 | `XM2API_LOG` | `logging.enabled` | `off` 关闭日志 |
 | `XM2API_LOG_BODY` | `logging.captureBody` | `off` 不记对话内容 |
@@ -274,7 +288,7 @@ server:
   upstreamTimeoutMs: 300000          # 上游空闲超时（图像/搜索单次可跑 10~40s）
   compat:
     webSearchFlag: true              # 把非标准 web_search:true 翻译成 tools 声明
-    webSearchAuto: false             # 更主动：每个请求都注入搜索工具，模型自己决定搜不搜
+    webSearchAuto: true              # 每个 TEXT 请求都注入搜索工具，模型自己决定搜不搜
 
 credentials:
   sid: mimopc                        # mimopc=聊天 route，passportapi=账号信息
@@ -356,8 +370,8 @@ node creds.mjs --check        # 只看 cookie 库当前能否复制
 
 - 调用方自带 `Cookie` 时不覆盖；目标 host 不匹配时不注入
 - 请求体**字节级原样转发**——不解析、不加 system prompt、不改任何字段
-  （唯一例外：请求体里出现非标准 `web_search` 键时翻译成 `tools` 声明，
-  可用 `server.compat.webSearchFlag: false` 关掉；已用回显上游比对 sha256 验证其余请求仍逐字节一致）
+  （唯一例外是联网：[`server.compat`](docs/tools-and-search.md#5-三种模式联网到底什么时候发生)
+  两档都关掉后即恢复纯透传，已用回显上游比对 sha256 验证逐字节一致）
 - 只改动协议必需的 `host` / `content-length`
 - SSE 逐块透传（不缓冲），额外补 `cache-control: no-cache` / `x-accel-buffering: no` 防中间层缓存
 - 响应状态码/头/体全透传

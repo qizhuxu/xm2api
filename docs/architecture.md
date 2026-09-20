@@ -145,7 +145,7 @@ function inject(headers, target) {
 | 不解析 / 改写 body | `up.write(bodyBuf)` 原样写出（**唯一例外**见下面「兼容层」） |
 | 不加 system prompt | `messages` 原样 |
 | 不加伪装头 | 不发 `X-Mimo-Source` / `X-Client-Version`（实测不需要） |
-| 不改参数 | model / max_tokens / stream / temperature / tools 都不碰 |
+| 不改参数 | model / max_tokens / stream / temperature 都不碰（`tools` 只做追加，不删不改调用方自己的） |
 | **不重试** | 上游 401 原样透传，中间层不"偷偷换 token 再试" |
 | **不刷新 token** | 刷新是 `creds.mjs` 离线跑的，与转发路径解耦 |
 | 不缓存 | 每个请求都真的打上游 |
@@ -154,26 +154,33 @@ function inject(headers, target) {
 ### 兼容层（唯一的 body 改写）
 
 `server.mjs` 的 `webSearchCompat()` 通过 `createRouteServer({transform})` 挂进转发内核。
-触发条件很窄，全部满足才改写：
+两档开关（`config.yaml` → `server.compat`）：
 
-1. `server.compat.webSearchFlag` 为真（默认，可关）
-2. 路径是 `*/chat/completions` 或 `/v1/completions`
-3. body 能解析成 JSON **且**含 `web_search` 键
+| 档 | 触发条件 | 效果 |
+|---|---|---|
+| `webSearchFlag`（默认开） | 路径是 `*/chat/completions`、body 是 JSON、**含 `web_search` 键** | 键 → `tools` 声明 |
+| `webSearchAuto`（默认开） | 路径是 `*/chat/completions`、body 是 JSON、**没含 `web_search` 键**、模型是 TEXT | 追加裸 `tools:[{type:"web_search"}]` |
 
 ```
 {"web_search": true}                            → tools += {"type":"web_search"}
 {"web_search": {"limit":5,"force_search":true}} → tools += {"type":"web_search","limit":5,"force_search":true}
-{"web_search": false}                           → 只删掉这个键
+{"web_search": false}                           → 只删掉这个键，且本次不做 auto 注入
 tools 里已有 web_search                          → 只删掉这个键，不重复添加
+两个档都关                                        → transform 直接返回 null，逐字节透传
 ```
 
 对象形态只取 `max_keyword` / `force_search` / `limit` 三个白名单键。
+`autoSearchAllowed()` 决定 auto 档能不能注入：先查目录里的 `modelType` 是不是 `TEXT`，
+查不到再按模型名兜底排除（`tts`/`asr`/`seedream`/`voiceclone`/`voicedesign`/`embedding`）——
+TTS/ASR 也走 chat/completions，塞搜索工具会坏事。目录在启动时预热一份，供这里同步查询。
+
 改写在 `upstream.mjs` 里发生于 `forward()` 开头，命中时打日志 `rewrites` 并写进
 `request.rewrites`；未命中时 `bodyBuf === rawBody`，仍是原来的 Buffer 直接 `up.write()`。
 
 为什么要这东西：上游只认 `tools:[{type:"web_search"}]`，而 `web_search:{enable:true}` /
 `enable_search` / `search` 这些常见写法会被上游**静默忽略** —— 不报错，模型却会回答
-"我没有联网能力"。把已知会被忽略的参数翻译成能用的形式，是纯增益。
+"我没有联网能力"。把已知会被忽略的参数翻译成能用的形式是纯增益；auto 档则是让
+"装了就有联网能力"（实测普通问题不加钱不加时延）。
 完整实测见 **[tools-and-search.md](tools-and-search.md)**。
 
 ### 三个隐藏动作
@@ -253,11 +260,19 @@ $env:XM2API_MIMO_SERVER='http://127.0.0.1:19099'; npm run serve
 中文+emoji+转义  114B  sha256=01821add38695e43  →  上游 114B 一致
 自定义请求头     原样保留（x-my-trace 等）
 只有 host / content-length 按协议重算
+```
 
-兼容层对照（只有出现 web_search 键才不一致）：
+> ⚠️ 上面是 `webSearchAuto` **关掉**时的结果（纯透传档）。
+> 默认 auto 档下，聊天请求会被追加一个 `tools` 条目，**不再逐字节一致** ——
+> 想要这份干净，`XM2API_COMPAT_WEBSEARCH_AUTO=0`。
+
+兼容层对照（只有联网档命中时才不一致）：
+
+```
 web_search:true  74B  →  上游 88B  {"…","tools":[{"type":"web_search"}]}
 web_search:false 75B  →  上游 56B  {"…"}      （键被删掉）
-XM2API_COMPAT_WEBSEARCH=0 时 web_search:true 也是 74B → 74B，完全原样
+auto 档 + 普通聊天  56B  →  上游 88B  {"…","tools":[{"type":"web_search"}]}
+两档都关时 web_search:true 也是 74B → 74B，完全原样
 ```
 
 注意：回显场景下目标 host 不是 `mimo-server-cn.*`，所以 **Cookie 不会被注入**——

@@ -18,10 +18,11 @@
 | 多候选 | ❌ | `n > 1` → `400 n is not supported` |
 | 旧版函数接口 | ❌ 静默忽略 | `functions` / `function_call` 不报错但完全不生效 |
 
-> **联网不是"默认开启"的**：反代默认只做翻译，不主动给请求加搜索工具。
-> 也就是说，**不写 `web_search` 也不写 `tools:[{type:"web_search"}]` 的请求，
-> 一次搜索都不会发生** —— 模型会照常回答"我无法联网"。
-> 想让每个请求都带上搜索能力（由模型自己决定搜不搜），见第 5 节「三种模式」。
+> **联网默认是"具备能力、按需触发"**：反代默认（auto 档）会给每个 TEXT 聊天请求
+> 补上搜索工具，**搜不搜由模型判断** —— 问「今天…」它会去搜，问「1+1」不会。
+> 不想让反代碰请求体（纯净透传），把 `server.compat.webSearchAuto` 设成 `false`，
+> 那时就只有你显式写 `web_search` / `tools:[{type:"web_search"}]` 才会联网。
+> 详见第 5 节「三种模式」。
 
 ---
 
@@ -198,12 +199,13 @@ delta.tool_calls = [{"index":0,"id":null,"function":{"arguments":"}","name":null
 
 ### 反代帮你兜住了
 
-**当前默认行为：不主动联网。** 反代只在**你明确要求**时出力 ——
-请求里没提 `web_search`、`tools` 里也没有 `web_search` 的，反代一个字都不改，
-一次搜索都不会发生。
+**当前默认行为（auto 档）：每个 TEXT 聊天请求都由反代补上搜索工具**，
+模型自己决定这次要不要搜 —— 普通问题不搜（`prompt_tokens` 不变、耗时不变），
+时效性问题自动搜。想恢复"你不要求就一个字都不改"，把
+`server.compat.webSearchAuto` 设成 `false`。
 
-请求体里出现非标准的 `web_search` 键时，反代会把它翻译成标准工具声明
-（`config.yaml` → `server.compat.webSearchFlag`，默认开）：
+请求体里出现非标准的 `web_search` 键时，反代也会把它翻译成标准工具声明
+（`config.yaml` → `server.compat.webSearchFlag`，默认开；auto 档下依然有效）：
 
 ```python
 {"web_search": true}                                  → tools += {"type":"web_search"}
@@ -213,7 +215,8 @@ delta.tool_calls = [{"index":0,"id":null,"function":{"arguments":"}","name":null
 
 细节：
 
-- **只有出现 `web_search` 键才改写**；其余请求依旧逐字节原样透传（已用本地回显上游验证 sha256 一致）。
+- **只有出现 `web_search` 键、或 auto 档生效时才改写**；把两档都关掉后，
+  请求体逐字节原样透传（已用本地回显上游验证 sha256 一致）。
 - `tools` 里已经有 `web_search` 时不重复添加。
 - 对象形态只取 `max_keyword` / `force_search` / `limit` 三个白名单键，其它键丢弃。
 - 每次改写都会在日志里留一条 `request.rewrites`，并在 stdout 打印。
@@ -253,9 +256,8 @@ delta.tool_calls = [{"index":0,"id":null,"function":{"arguments":"}","name":null
 2. **自己写脚本**：直接用 `tools: [{"type":"web_search"}]`，从 `annotations` 里取引用做展示。
 
 如果客户端会把搜索开关翻译成它自己的参数（比如 `enable_search`），
-把参数名改成 `web_search` 即可 —— 反代只认这一个键。
-
-**如果客户端连额外参数都不给填** —— 见下一节的 `auto` 档。
+把参数名改成 `web_search` 即可 —— 反代只认这一个键。不过默认的 auto 档
+已经覆盖了这种情况：什么都不用填，模型该搜就搜。
 
 ---
 
@@ -265,29 +267,36 @@ delta.tool_calls = [{"index":0,"id":null,"function":{"arguments":"}","name":null
 
 | 模式 | 配置 | 行为 | 联网何时发生 |
 |---|---|---|---|
-| **off** | `webSearchFlag: false`<br>`webSearchAuto: false` | 一个字都不改 | 只有调用方自己写 `tools:[{type:"web_search"}]` 时 |
-| **flag**（默认） | `webSearchFlag: true`<br>`webSearchAuto: false` | 出现 `web_search` 键才翻译成工具声明 | 调用方写 `web_search: true`（或自己发工具）时 |
-| **auto** | `webSearchAuto: true` | 每个 **TEXT** 聊天请求都注入裸 `tools:[{type:"web_search"}]` | 由**模型自己判断**：时效性问题会搜，`1+1=?` 不会 |
+| **off** | `webSearchFlag: false`<br>`webSearchAuto: false` | 一个字都不改（纯透传） | 只有调用方自己写 `tools:[{type:"web_search"}]` 时 |
+| **flag** | `webSearchFlag: true`<br>`webSearchAuto: false` | 出现 `web_search` 键才翻译成工具声明 | 调用方写 `web_search: true`（或自己发工具）时 |
+| **auto** ✅当前默认 | `webSearchAuto: true` | 给**不带 tools 的** TEXT 聊天请求注入裸 `tools:[{type:"web_search"}]` | 由**模型自己判断**：时效性问题会搜，`1+1=?` 不会 |
 
-> **所以默认（flag 档）不是"自动联网"**：不写 `web_search` 的请求，一次搜索都不会发生。
+> **默认是 auto**：装了就有联网能力，跟官方客户端一样"该搜的时候自己搜"。
+> 代价是**不带 tools 的 TEXT 聊天请求 body 会被改写**（追加一个 `tools` 条目），
+> 不再是逐字节透传。要那种纯净行为，把 `webSearchAuto` 设成 `false`（回到 flag 档）。
 
 `auto` 档实测（真实上游）：
 
 | 请求 | 耗时 | prompt_tokens | 引用 | 说明 |
 |---|---|---|---|---|
-| `1+1=?` | 788ms | 11 | 0 | 不搜，和不加工具时完全一样 |
-| `今天有什么科技新闻？` | 21s | 8216 | 25 | 自己去搜了 |
-| TTS 模型合成语音 | 1218ms | — | — | ✅ 19KB 音频正常，**没被塞工具** |
-| `今天…` + `web_search: false` | 1065ms | 12 | 0 | 单次关掉生效 |
+| `1+1=?` / 「什么是 TCP」 | 0.8~1.5s | 11~13 | 0 | 不搜，和不加工具时完全一样 |
+| `今天有什么科技新闻？` | 4~21s | 7281~8216 | 25 | 自己去搜了 |
+| 别名 `mimo-pro` 问今天新闻 | 7~10s | 8658~8986 | 24~25 | 别名一样生效 |
+| TTS 模型合成语音 | 1~2.5s | — | — | ✅ 19~22KB 音频正常，**没被塞工具** |
+| **自带 `get_weather` 函数** | 0.4s | — | — | ✅ `tool_calls` 正常，**反代完全不碰** |
+| `今天…` + `web_search: false` | 1.1s | 12 | 0 | 单次关掉生效 |
 
-`auto` 档的保护：
+`auto` 档的三条边界（都在回显上游上逐条验证过）：
 
+- **调用方自带 `tools` 时一概不插手**。这是踩出来的：一开始无脑追加，结果
+  「上海天气如何？」模型改去联网、**不调调用方的 `get_weather` 了**（实测流式下
+  0 个 `tool_calls` 分片、159 个 SSE 事件）。函数调用/agent 场景要不要搜索，
+  交给调用方自己写 `web_search: true`。
 - **只对 TEXT 模型注入**。先按目录里的 `modelType` 判断，目录拉不到时按模型名兜底
   （`tts` / `asr` / `seedream` / `voiceclone` / `voicedesign` / `embedding` 一律跳过）——
   TTS/ASR 也走 chat/completions，塞工具会坏事。
-- 请求里已经有 `web_search` 工具时不重复添加。
-- 单次想关：请求里写 `"web_search": false`。
-- 环境变量：`XM2API_COMPAT_WEBSEARCH_AUTO=1`。
+- 请求里已经有 `web_search` 工具时不重复添加；单次想关写 `"web_search": false`。
+- 环境变量：`XM2API_COMPAT_WEBSEARCH_AUTO=0` 关闭。
 
 ---
 

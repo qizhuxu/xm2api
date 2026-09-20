@@ -45,13 +45,17 @@ server:
     #    详见 docs/tools-and-search.md
     webSearchFlag: true
 
-    # ② 主动档（默认关）：请求里**没提** web_search 时，也注入裸 tools:[{type:"web_search"}]，
+    # ② 主动档（默认开）：**不带 tools 的** TEXT 聊天请求会注入裸 tools:[{type:"web_search"}]，
     #    由模型自己决定搜不搜。实测普通问题（"1+1=?"）prompt_tokens 不变、耗时不变，
     #    只有真触发搜索时才多花 6000+ tokens 和几秒；时效性问题（"今天…"）会自己去搜。
+    #    ⚠️ 开了它，这类请求的 body 会被改写 —— 不再是逐字节透传。
+    #       想要"你不要求就一个字都不改"，把它设成 false。
+    #    ⚠️ 调用方自带 tools（函数调用 / agent）时**一概不插手** —— 实测无脑追加会让
+    #       模型改去联网、不调你自己的函数。那种场景要联网请显式写 "web_search": true。
     #    注意：只对 TEXT 模型注入（TTS/ASR 也走 chat/completions，塞工具会坏事）；
     #    想单次关掉就在该请求里写 "web_search": false。
-    #    环境变量：XM2API_COMPAT_WEBSEARCH_AUTO=1
-    webSearchAuto: false
+    #    环境变量：XM2API_COMPAT_WEBSEARCH_AUTO=0
+    webSearchAuto: true
 
 credentials:
   # SSO 交换用的 sid：
