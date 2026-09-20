@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 )
@@ -102,6 +103,46 @@ func fallbackInfos() []modelInfo {
 	out := make([]modelInfo, 0, len(fallbackModels))
 	for _, m := range fallbackModels {
 		out = append(out, toModelInfo(m))
+	}
+	return out
+}
+
+// matchModel 支持精确匹配和 * / ? 通配（大小写不敏感）。
+func matchModel(pattern, name string) bool {
+	p := strings.ToLower(strings.TrimSpace(pattern))
+	n := strings.ToLower(strings.TrimSpace(name))
+	if p == "" {
+		return false
+	}
+	if !strings.ContainsAny(p, "*?[") {
+		return p == n
+	}
+	ok, err := path.Match(p, n)
+	return err == nil && ok
+}
+
+// applyExclusions 按 exclude_models 过滤。
+//
+// 存在的意义：上游目录里有 Doubao-Seedream-5.0-pro（图像模型），但 CPA 的
+// /v1/images/generations 有硬编码白名单，插件执行器服务不了它。把它列在
+// /v1/models 里会让人以为是可用的，所以给用户一个隐藏的开关。
+func applyExclusions(list []modelInfo) []modelInfo {
+	patterns := config().ExcludeModels
+	if len(patterns) == 0 {
+		return list
+	}
+	out := make([]modelInfo, 0, len(list))
+	for _, m := range list {
+		skip := false
+		for _, p := range patterns {
+			if matchModel(p, m.ID) {
+				skip = true
+				break
+			}
+		}
+		if !skip {
+			out = append(out, m)
+		}
 	}
 	return out
 }
@@ -228,6 +269,8 @@ func handleModels(method string, req []byte) []byte {
 	}
 
 	models, source := resolveModels(cookie)
+	// 过滤放在这里而不是缓存里：改了 exclude_models 立刻生效，不用等缓存过期
+	models = applyExclusions(models)
 	hostLog("debug", fmt.Sprintf("MiMo 模型目录: %d 个（来源 %s）", len(models), source))
 
 	return okResult(map[string]any{

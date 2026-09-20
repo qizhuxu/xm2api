@@ -49,11 +49,12 @@ var pluginRepo = "https://github.com/your-org/xm2api"
 // cfg 是 plugins.configs.mimo 下的插件自有配置。宿主只解析 enabled/priority，
 // 其余字段原样透传，所以这里全部可选、都有默认值。
 type cfg struct {
-	BaseURL       string `yaml:"base_url"`
-	SID           string `yaml:"sid"`
-	WebSearchAuto bool   `yaml:"web_search_auto"`
-	RefreshAfter  string `yaml:"refresh_after"`
-	ModelTTL      string `yaml:"model_ttl"`
+	BaseURL       string   `yaml:"base_url"`
+	SID           string   `yaml:"sid"`
+	WebSearchAuto bool     `yaml:"web_search_auto"`
+	RefreshAfter  string   `yaml:"refresh_after"`
+	ModelTTL      string   `yaml:"model_ttl"`
+	ExcludeModels []string `yaml:"exclude_models"`
 }
 
 func defaultCfg() cfg {
@@ -333,6 +334,7 @@ func handleRegister(req []byte) []byte {
 				{"Name": "web_search_auto", "Type": "boolean", "Description": "请求未自带 tools 时自动追加 {\"type\":\"web_search\"}（等价于 CPA 的 payload 规则，二选一）"},
 				{"Name": "refresh_after", "Type": "string", "Description": "多久主动换一次 serviceToken，默认 6h"},
 				{"Name": "model_ttl", "Type": "string", "Description": "模型清单缓存时长，默认 10m"},
+				{"Name": "exclude_models", "Type": "array", "Description": "要从模型列表里隐藏的模型名，支持 * 通配。例如 [\"Doubao-*\"]（图像模型无法经插件服务，见 README）"},
 			},
 		},
 		"capabilities": map[string]any{

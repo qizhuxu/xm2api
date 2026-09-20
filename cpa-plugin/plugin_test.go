@@ -87,6 +87,62 @@ func TestMaybeInjectWebSearch(t *testing.T) {
 	})
 }
 
+/* --------------------------------------------------------- 模型过滤 */
+
+func TestMatchModel(t *testing.T) {
+	cases := []struct {
+		pattern, name string
+		want          bool
+	}{
+		{"Doubao-Seedream-5.0-pro", "Doubao-Seedream-5.0-pro", true}, // 精确
+		{"doubao-seedream-5.0-pro", "Doubao-Seedream-5.0-pro", true}, // 大小写不敏感
+		{"Doubao-*", "Doubao-Seedream-5.0-pro", true},
+		{"*-tts", "mimo-v2.5-tts", true},
+		{"mimo-v2.5-*", "mimo-v2.5-tts-voiceclone", true},
+		{"mimo-x-*-preview", "mimo-x-flash-preview", true},
+		{"Doubao-*", "mimo-x-flash-preview", false},
+		{"", "anything", false},                  // 空模式不匹配任何东西
+		{"mimo-v2.5-tts", "mimo-v2.5-tts-x", false},
+	}
+	for _, c := range cases {
+		if got := matchModel(c.pattern, c.name); got != c.want {
+			t.Errorf("matchModel(%q, %q) = %v, want %v", c.pattern, c.name, got, c.want)
+		}
+	}
+}
+
+func TestApplyExclusions(t *testing.T) {
+	list := []modelInfo{
+		{ID: "mimo-x-flash-preview"}, {ID: "mimo-x-pro-preview"},
+		{ID: "mimo-v2.5-tts"}, {ID: "Doubao-Seedream-5.0-pro"},
+	}
+
+	// 不配就原样返回
+	setConfig(defaultCfg())
+	if got := applyExclusions(list); len(got) != 4 {
+		t.Fatalf("默认不该过滤，得到 %d 个", len(got))
+	}
+
+	// 隐藏图像模型（README 推荐的用法）
+	setConfig(cfg{ExcludeModels: []string{"Doubao-*"}})
+	defer setConfig(defaultCfg())
+	got := applyExclusions(list)
+	if len(got) != 3 {
+		t.Fatalf("期望剩 3 个，得到 %d", len(got))
+	}
+	for _, m := range got {
+		if m.ID == "Doubao-Seedream-5.0-pro" {
+			t.Fatal("Doubao 应该被过滤掉")
+		}
+	}
+
+	// 多个模式
+	setConfig(cfg{ExcludeModels: []string{"Doubao-*", "*-tts"}})
+	if got := applyExclusions(list); len(got) != 2 {
+		t.Fatalf("期望剩 2 个，得到 %d", len(got))
+	}
+}
+
 /* ------------------------------------------------------------- 凭证 */
 
 func TestCredNormalizeFromCookie(t *testing.T) {

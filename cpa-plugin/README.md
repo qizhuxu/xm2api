@@ -120,6 +120,7 @@ curl -H "Authorization: Bearer <你的 api-key>" http://127.0.0.1:8317/v1/models
 | `web_search_auto` | boolean | `false` | 请求未自带 `tools` 时追加 `{"type":"web_search"}` |
 | `refresh_after` | string | `6h` | 多久主动换一次 serviceToken |
 | `model_ttl` | string | `10m` | 模型清单缓存时长 |
+| `exclude_models` | array | `[]` | 从模型列表隐藏的模型名，支持 `*` 通配，如 `["Doubao-*"]` |
 
 改完可以热重载，不用重启：
 
@@ -237,6 +238,8 @@ CPA 内部对 JSON 字段命名不统一：`sdk/pluginapi` 里多数结构体没
 | `hostcall.go` | `host.*` 回调封装、宽松 JSON 解码 |
 | `debug.go` | 插件内部文件日志 + cookie 脱敏 |
 | `plugin_test.go` | 单元测试 + 可选的实网 SSO 测试 |
+| `package.ps1` | Windows 打包（插件商店 release 资产），含 zip 布局校验 |
+| `Makefile` | 同上，给有 make 的环境 / CI 用 |
 
 ## 7. 测试
 
@@ -261,19 +264,89 @@ $env:MIMO_PLUGIN_DEBUG = "1"    # 启动 CPA 前设置
 - 资产命名 `<id>_<version>_<goos>_<goarch>.zip`，以及一个 `checksums.txt`（sha256sum 格式）
 - **zip 根目录直接放动态库**，不能套子目录，且只能有一个动态库
 
+本机打包（Windows，不需要 make / zip）：
+
 ```powershell
-make package GOOS=windows GOARCH=amd64
-# 生成 dist/mimo_0.1.0_windows_amd64.zip 和 dist/checksums.txt
+pwsh -File package.ps1 -Version 0.1.0
+# dist/mimo_0.1.0_windows_amd64.zip  +  dist/checksums.txt
+# 脚本会自己校验 zip 布局，不对就直接报错
 ```
 
-然后向 [CLIProxyAPI-Plugins-Store](https://github.com/router-for-me/CLIProxyAPI-Plugins-Store) 提 PR 加一条 registry 记录。
+多平台发布走 CI：`.github/workflows/release.yml`（**在仓库根目录**，不是插件目录 —— GitHub 只读根目录的 `.github/workflows/`）。推一个 `v0.1.0` tag 就会出 5 个平台的包并汇总 `checksums.txt` 挂到 release。
 
-## 9. 已知局限
+> 交叉编译 `-buildmode=c-shared` 需要目标平台的 C 工具链，所以矩阵里用的是各平台原生 runner（arm64 用 GitHub 的 arm runner）。
 
-- **只有 chat/completions**。CPA 的 `executor` 能力只声明 `chat-completions` / `responses` / `anthropic` 三种协议，**没有图像/音频路由**。所以：
-  - 图像生成（`Doubao-Seedream-5.0-pro` 会出现在模型列表里，但走 `/v1/images/generations` 打不通）；
-  - TTS / ASR（MiMo 实际是走 `chat/completions` + `audio` / `input_audio` 扩展字段，理论上能过本执行器，但没做专门适配）。
-  
-  这些入口留在 xm2api 里当 sidecar 更合适。
+然后向 [CLIProxyAPI-Plugins-Store](https://github.com/router-for-me/CLIProxyAPI-Plugins-Store) 提 PR 加一条 registry 记录：
+
+```json
+{
+  "id": "mimo",
+  "name": "Xiaomi MiMo",
+  "description": "Xiaomi MiMo Desktop SSO provider: chat, TTS, ASR and web search.",
+  "author": "<你的 GitHub 用户名>",
+  "repository": "https://github.com/<你>/<仓库>",
+  "license": "MIT",
+  "tags": ["Provider", "MiMo", "Xiaomi"]
+}
+```
+
+注意 `id` 必须与动态库文件名一致（`mimo.dll` → `mimo`），且 `repository` 必须是 `https://github.com/{owner}/{repo}` 形式。
+
+## 9. 各模型实测结果
+
+CPA v7.3.9 + 真实 MiMo 账号，全部经本插件执行器转发。
+
+| 模型 / 能力 | 结果 | 说明 |
+|---|---|---|
+| `mimo-x-flash-preview` / `mimo-x-pro-preview` | ✅ | 非流式 1.0s、流式 0.7s；function calling、联网搜索均正常 |
+| `mimo-v2.5-tts` | ✅ | `chat/completions` + `audio:{format:"mp3"}`，文本放 **assistant** 角色；音频在 `choices[0].message.audio.data`（base64），实测 15.8 KB |
+| `mimo-v2.5-tts-voicedesign` | ✅ | 同上，用 **user** 角色的 `instructions` 描述音色 |
+| `mimo-v2.5-tts-voiceclone` | ✅ | 同上，`audio.voice` 传参考音频的 data URL |
+| `mimo-v2.5-asr` | ✅ | `messages[].content` 放 `{"type":"input_audio"}`；转写文本在 `message.content`。闭环实测：TTS 合成「这是一段语音合成测试。」→ ASR 原样转回 |
+| `Doubao-Seedream-5.0-pro`（图像） | ❌ | **插件服务不了**，见下 |
+
+TTS/ASR 能通是因为它们本来就打 `chat/completions`（`/v1/audio/*` 在上游没配供应商，会 401）。所以执行器不需要任何特判 —— 连 `usage.prompt_tokens_details.audio_tokens`、`usage.seconds`、`message.audio.transcript` 这些 MiMo 扩展都原样穿过。
+
+### 图像生成为什么不行
+
+`POST /v1/images/generations` 会被 CPA 在**进入插件之前**拒掉：
+
+```
+400 Model Doubao-Seedream-5.0-pro is not supported on /v1/images/generations
+    or /v1/images/edits. Use gpt-image-1.5, ..., or a configured
+    openai-compatibility image model.
+```
+
+CPA 在这个接口上有一份**硬编码模型白名单**（`gpt-image-*` / `grok-imagine-*`），自定义模型唯一的扩展路径就是 `openai-compatibility` —— 插件执行器压根没有图像路由（`executor_input_formats` 只认 `chat-completions` / `responses` / `anthropic`）。
+
+**两个选择：**
+
+1. **不要图像** —— 用 `exclude_models: ["Doubao-*"]` 把它从列表里藏掉，免得误导：
+
+   ```yaml
+   plugins:
+     configs:
+       mimo:
+         exclude_models: ["Doubao-*"]
+   ```
+
+2. **混合部署** —— 插件跑文本/语音（不需要 Node 进程），另外让 xm2api 常驻专门供图像。注意 provider 名要**不一样**，否则会触发「同 provider 时 openai-compatibility 优先」把插件顶掉：
+
+   ```yaml
+   openai-compatibility:
+     - name: "mimo-image"                      # ← 不能叫 mimo
+       base-url: "http://127.0.0.1:18787/v1"   # xm2api 的 Node 反代
+       api-key-entries:
+         - api-key: "xm2api-local"
+       models:
+         - name: "Doubao-Seedream-5.0-pro"
+           alias: "Doubao-Seedream-5.0-pro"
+           image: true                          # ← 这个标记才能进图像白名单
+   ```
+
+## 10. 其它已知局限
+
 - `executor.count_tokens` 是按字节数 / 4 的**粗略估算**，上游没有暴露 tokenizer。
 - 插件与 CPA 同进程，是受信任代码。别加载来路不明的动态库。
+- `model.static`（无凭证时）拿不到上游目录，只能吃缓存或两个文本模型的兜底清单；带凭证的 `model.for_auth` 才是完整目录。
+

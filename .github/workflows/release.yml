@@ -1,0 +1,120 @@
+# 打 CLIProxyAPI 插件商店要求的 release 资产。
+#
+# 与官方 cpa-plugin-jshandler 的做法一致：tag 触发出多平台包 + 汇总 checksums.txt。
+#
+# 关于 runner 选择：
+#   - c-shared 是 CGO 构建，必须有目标平台的 C 工具链；
+#   - Go 不支持 freebsd/arm64 的 -buildmode=c-shared，所以不提供；
+#   - windows/arm64 与 linux/arm64 在 x64 runner 上做交叉编译容易踩坑，
+#     这里用原生 arm runner（公开仓库免费）。
+#
+# 直接用官方脚本会踩的坑：windows runner 默认 shell 是 pwsh，
+# 而 `go build` 里的 -ldflags "-s -w" 在 pwsh 下引号语义不同，
+# 所以下面显式指定 bash。
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（不带 v），仅用于手动打包"
+        required: true
+        default: "0.1.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64, runner: ubuntu-24.04,     ext: so }
+          - { goos: linux,   goarch: arm64, runner: ubuntu-24.04-arm, ext: so }
+          - { goos: darwin,  goarch: amd64, runner: macos-15-intel,   ext: dylib }
+          - { goos: darwin,  goarch: arm64, runner: macos-15,         ext: dylib }
+          - { goos: windows, goarch: amd64, runner: windows-2025,     ext: dll }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache-dependency-path: cpa-plugin/go.sum
+
+      - name: 单元测试
+        shell: bash
+        working-directory: cpa-plugin
+        run: go test ./...
+
+      - name: 编译动态库
+        shell: bash
+        working-directory: cpa-plugin
+        env:
+          CGO_ENABLED: "1"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          go build -buildmode=c-shared -trimpath -ldflags "-s -w" \
+            -o "dist/mimo.${{ matrix.ext }}" .
+
+      - name: 打包（zip 根目录只放动态库）
+        shell: bash
+        working-directory: cpa-plugin
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          EXT: ${{ matrix.ext }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="${{ github.event.inputs.version }}"
+          fi
+          ASSET="mimo_${VERSION}_${GOOS}_${GOARCH}.zip"
+          mkdir -p dist/stage
+          cp "dist/mimo.${EXT}" "dist/stage/mimo.${EXT}"
+          (cd dist/stage && zip -q "../${ASSET}" "mimo.${EXT}")
+          # 校验：zip 根目录有且只有那一个动态库
+          test "$(unzip -Z1 "dist/${ASSET}" | tr -d '\r')" = "mimo.${EXT}"
+          echo "ASSET=${ASSET}" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mimo-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: cpa-plugin/dist/*.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: 汇总 checksums.txt
+        run: |
+          set -euo pipefail
+          cd artifacts
+          ls -l
+          sha256sum ./*.zip > checksums.txt
+          cat checksums.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/*.zip
+            artifacts/checksums.txt
+          generate_release_notes: true

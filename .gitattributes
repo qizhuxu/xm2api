@@ -15,6 +15,7 @@
 *.go     text eol=lf
 *.c      text eol=lf
 *.h      text eol=lf
+*.ps1    text eol=lf
 Makefile text eol=lf
 go.mod   text eol=lf
 go.sum   text eol=lf
