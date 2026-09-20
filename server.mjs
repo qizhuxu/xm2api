@@ -192,44 +192,76 @@ async function resolveModels() {
  * 而 `web_search: true`、`web_search: {enable:true}` 这类写法上游**完全忽略** ——
  * 模型会一本正经地回答"我没有联网能力"。这里把它翻译成标准工具声明。
  *
- * 只有请求体里真的出现 `web_search` 键才改写；其余情况返回 null，请求体逐字节透传。
+ * 两档，都由 config.yaml 控制：
+ *   webSearchFlag（默认开）—— 请求里出现 `web_search` 键时才翻译
+ *   webSearchAuto（默认关）—— 请求里没提也注入裸工具，由模型自己决定搜不搜
+ *
+ * 不满足条件就返回 null，请求体逐字节透传（这是默认情况）。
  */
 const SEARCH_TOOL_KEYS = ["max_keyword", "force_search", "limit"];
 
+/** 目录里标的不是 TEXT 的（TTS/ASR/图像）不能塞工具 —— 它们也走 chat/completions */
+const NON_CHAT_NAME = /tts|asr|seedream|image|voiceclone|voicedesign|embedding|rerank/i;
+
+function autoSearchAllowed(name) {
+  const n = String(name || "");
+  // ① 名字一看就不是聊天模型 → 一定不注入（目录拉不到时也拦得住）
+  if (NON_CHAT_NAME.test(n)) return false;
+  // ② 目录里有 → 严格按 modelType 判定
+  const m = modelsCache.list?.find((x) => x.modelName === n);
+  if (m) return String(m.modelType || "").toUpperCase() === "TEXT";
+  // ③ 目录里没有（别名如 mimo-pro，或目录没拉到）→ 当成聊天模型
+  //    （上面第 ① 条已经挡掉了已知的非聊天模型，这里放行是安全的）
+  return true;
+}
+
 function webSearchCompat(bodyBuf, { pathname }) {
-  if (!config.server.compat.webSearchFlag) return null;
+  const { webSearchFlag, webSearchAuto } = config.server.compat;
+  if (!webSearchFlag && !webSearchAuto) return null;
   if (!/(^|\/)chat\/completions$/.test(pathname) && pathname !== "/v1/completions") return null;
 
   let j;
   try {
     j = JSON.parse(bodyBuf.toString("utf8"));
   } catch {
-    return null; // 不是 JSON（或流式之外的形态），原样转发
+    return null; // 不是 JSON，原样转发
   }
-  if (!j || typeof j !== "object" || !("web_search" in j)) return null;
+  if (!j || typeof j !== "object" || Array.isArray(j)) return null;
 
-  const ws = j.web_search;
-  delete j.web_search;
+  const hasKey = Object.prototype.hasOwnProperty.call(j, "web_search");
+  if (!hasKey && !webSearchAuto) return null; // 默认路径：一个字都不改
+  if (!hasKey && !autoSearchAllowed(j.model)) return null; // TTS/ASR 别塞搜索工具
+
+  const ws = hasKey ? j.web_search : undefined;
+  if (hasKey) delete j.web_search;
 
   const tools = Array.isArray(j.tools) ? [...j.tools] : [];
   const already = tools.some((t) => t && (t.type === "web_search" || t.type === "builtin_web_search"));
 
-  if (ws === false || ws === null) {
-    return { body: Buffer.from(JSON.stringify(j)), rewrites: ["丢掉 web_search=false（上游本来也忽略它）"] };
+  // web_search:false —— 显式"这次别搜"，同时也不做 auto 注入
+  if (hasKey && (ws === false || ws === null)) {
+    return { body: Buffer.from(JSON.stringify(j)), rewrites: ["丢掉 web_search=false（本次不联网）"] };
   }
-  if (ws !== true && (typeof ws !== "object" || Array.isArray(ws))) return null;
+  // 形态不认识（字符串等）→ 原样转发，别乱动
+  if (hasKey && ws !== true && (typeof ws !== "object" || Array.isArray(ws))) return null;
+  // 调用方自己已经声明了搜索工具
+  if (already) {
+    return hasKey
+      ? { body: Buffer.from(JSON.stringify(j)), rewrites: ["web_search 键已删除（tools 里本来就有 web_search）"] }
+      : null;
+  }
 
   const tool = { type: "web_search" };
-  if (ws !== true) for (const k of SEARCH_TOOL_KEYS) if (ws[k] !== undefined) tool[k] = ws[k];
-
-  if (already) {
-    return { body: Buffer.from(JSON.stringify(j)), rewrites: ["web_search 键已删除（tools 里本来就有 web_search）"] };
-  }
+  if (hasKey && ws !== true) for (const k of SEARCH_TOOL_KEYS) if (ws[k] !== undefined) tool[k] = ws[k];
   tools.push(tool);
   j.tools = tools;
   return {
     body: Buffer.from(JSON.stringify(j)),
-    rewrites: [`web_search:${JSON.stringify(ws)} → tools += ${JSON.stringify(tool)}`],
+    rewrites: [
+      hasKey
+        ? `web_search:${JSON.stringify(ws)} → tools += ${JSON.stringify(tool)}`
+        : `auto 注入 ${JSON.stringify(tool)}（模型自己决定搜不搜）`,
+    ],
   };
 }
 
@@ -386,10 +418,14 @@ const routeServer = createRouteServer({
         tool_choice: ["auto", "none", "required", { type: "function", function: { name: "..." } }],
         web_search: {
           native: 'tools: [{type:"web_search"}]  →  message.annotations[] + usage.web_search_usage',
-          tool_options: { max_keyword: "改写关键词条数", force_search: "强制先搜再答", limit: "参考网页条数" },
+          tool_options: { max_keyword: "改写关键词条数", force_search: "提高搜索概率（不是强制）", limit: "参考网页条数" },
+          default_behavior: "反代默认不主动联网：请求里没提 web_search 就一个字都不改",
           compat_flag: config.server.compat.webSearchFlag
-            ? '也接受非标准 web_search: true / {max_keyword,force_search,limit}，由反代翻译'
-            : "已关闭（config.yaml → server.compat.webSearchFlag）",
+            ? '接受非标准 web_search: true / {max_keyword,force_search,limit}，由反代翻译成工具声明'
+            : "翻译已关闭（config.yaml → server.compat.webSearchFlag）",
+          compat_auto: config.server.compat.webSearchAuto
+            ? "已开启：每个 TEXT 聊天请求都注入裸 tools:[{type:\"web_search\"}]，模型自己决定搜不搜"
+            : "未开启（config.yaml → server.compat.webSearchAuto）—— 需要每个请求都带搜索能力时再打开",
         },
         vision: "content[].type=image_url（data: 或 http(s) 均可）",
         json_schema: true,
@@ -415,6 +451,10 @@ const routeServer = createRouteServer({
     };
   },
 });
+
+// 预热模型目录：兼容层 auto 档要靠 modelType 判断哪些模型能塞搜索工具
+// （TTS/ASR 也走 chat/completions，给它们塞 web_search 会坏事）
+resolveModels().catch(() => {});
 
 listen(routeServer, {
   onReady: () => {

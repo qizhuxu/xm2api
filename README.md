@@ -128,7 +128,13 @@ print(json.load(urllib.request.urlopen(req))["choices"][0]["message"]["content"]
 ```python
 {"web_search": true}                               # → 自动变成 tools:[{type:"web_search"}]
 {"web_search": {"limit": 5, "force_search": true}} # → 带参数的搜索工具
+{"web_search": false}                              # → 本次不联网
 ```
+
+**联网默认不会自动发生** —— 不写 `web_search` 的请求反代一个字都不改。
+想让每个请求都带上搜索能力（模型自己决定搜不搜），把 `server.compat.webSearchAuto`
+打开即可；实测普通问题不加钱不加时延（`prompt_tokens` 不变），时效性问题才去搜。
+三种模式的对照表见 **[docs/tools-and-search.md](docs/tools-and-search.md)** 第 5 节。
 
 > ⚠️ `web_search: {enable:true}` / `enable_search:true` / `search:{...}` 这类写法上游是
 > **静默忽略**的：不报错，但模型会一本正经地回答"我没有联网能力"。
@@ -245,6 +251,7 @@ print(r["data"][0]["url"])        # 签名 URL，X-Tos-Expires=86400（24 小时
 | `XM2API_SID` | `credentials.sid` | SSO 的 sid |
 | `XM2API_UPSTREAM_TIMEOUT_MS` | `server.upstreamTimeoutMs` | 上游空闲超时 |
 | `XM2API_COMPAT_WEBSEARCH` | `server.compat.webSearchFlag` | `0` 关掉 web_search 翻译 |
+| `XM2API_COMPAT_WEBSEARCH_AUTO` | `server.compat.webSearchAuto` | `1` 每个请求都注入搜索工具 |
 | `XM2API_MODELS_TTL_MS` | — | `/v1/models` 缓存时长（默认 5 分钟） |
 | `XM2API_LOG` | `logging.enabled` | `off` 关闭日志 |
 | `XM2API_LOG_BODY` | `logging.captureBody` | `off` 不记对话内容 |
@@ -267,6 +274,7 @@ server:
   upstreamTimeoutMs: 300000          # 上游空闲超时（图像/搜索单次可跑 10~40s）
   compat:
     webSearchFlag: true              # 把非标准 web_search:true 翻译成 tools 声明
+    webSearchAuto: false             # 更主动：每个请求都注入搜索工具，模型自己决定搜不搜
 
 credentials:
   sid: mimopc                        # mimopc=聊天 route，passportapi=账号信息

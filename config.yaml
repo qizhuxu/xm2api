@@ -32,18 +32,26 @@ server:
   # 环境变量：XM2API_UPSTREAM_TIMEOUT_MS
   upstreamTimeoutMs: 300000
 
-  # 请求体兼容层。反代默认逐字节透传，只有命中下面这条规则才会改写。
+  # 请求体兼容层。反代默认逐字节透传，只有命中下面规则才会改写。
   compat:
-    # 上游只认 tools:[{type:"web_search"}] 才会联网；写 web_search:{enable:true}、
-    # enable_search:true、search:{...} 都会被上游静默忽略（模型会嘴硬说"我没有联网能力"）。
-    # 打开后：
-    #   {"web_search": true}                            → tools += {"type":"web_search"}
-    #   {"web_search": {"limit":5,"force_search":true}} → tools += {"type":"web_search","limit":5,"force_search":true}
-    #   {"web_search": false}                           → 删掉这个键
-    # 每次改写都会写进日志的 request.rewrites。
-    # 关掉它 = 完全不做任何请求体改写。环境变量：XM2API_COMPAT_WEBSEARCH=0
-    # 详见 docs/tools-and-search.md
+    # ① 翻译档：上游只认 tools:[{type:"web_search"}] 才会联网；写 web_search:{enable:true}、
+    #    enable_search:true、search:{...} 都会被上游静默忽略（模型会嘴硬说"我没有联网能力"）。
+    #    打开后：
+    #      {"web_search": true}                            → tools += {"type":"web_search"}
+    #      {"web_search": {"limit":5,"force_search":true}} → tools += {"type":"web_search","limit":5,"force_search":true}
+    #      {"web_search": false}                           → 删掉这个键（本次不联网）
+    #    每次改写都会写进日志的 request.rewrites。
+    #    关掉它 = 不再翻译。环境变量：XM2API_COMPAT_WEBSEARCH=0
+    #    详见 docs/tools-and-search.md
     webSearchFlag: true
+
+    # ② 主动档（默认关）：请求里**没提** web_search 时，也注入裸 tools:[{type:"web_search"}]，
+    #    由模型自己决定搜不搜。实测普通问题（"1+1=?"）prompt_tokens 不变、耗时不变，
+    #    只有真触发搜索时才多花 6000+ tokens 和几秒；时效性问题（"今天…"）会自己去搜。
+    #    注意：只对 TEXT 模型注入（TTS/ASR 也走 chat/completions，塞工具会坏事）；
+    #    想单次关掉就在该请求里写 "web_search": false。
+    #    环境变量：XM2API_COMPAT_WEBSEARCH_AUTO=1
+    webSearchAuto: false
 
 credentials:
   # SSO 交换用的 sid：

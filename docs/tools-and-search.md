@@ -18,6 +18,11 @@
 | 多候选 | ❌ | `n > 1` → `400 n is not supported` |
 | 旧版函数接口 | ❌ 静默忽略 | `functions` / `function_call` 不报错但完全不生效 |
 
+> **联网不是"默认开启"的**：反代默认只做翻译，不主动给请求加搜索工具。
+> 也就是说，**不写 `web_search` 也不写 `tools:[{type:"web_search"}]` 的请求，
+> 一次搜索都不会发生** —— 模型会照常回答"我无法联网"。
+> 想让每个请求都带上搜索能力（由模型自己决定搜不搜），见第 5 节「三种模式」。
+
 ---
 
 ## 1. 函数调用
@@ -143,14 +148,38 @@ delta.tool_calls = [{"index":0,"id":null,"function":{"arguments":"}","name":null
 {"tools": [{"type": "web_search", "max_keyword": 3, "force_search": true, "limit": 5}]}
 ```
 
-| 参数 | 作用 |
-|---|---|
-| `force_search` | 强制先搜再答（默认模型可能判断"这题不用搜") |
-| `max_keyword` | 改写出几条搜索关键词 |
-| `limit` | 参考网页条数（实测 `limit:5` → `page_usage:25`） |
+| 参数 | 作用 | 实测 |
+|---|---|---|
+| `force_search` | 提高"先搜再答"的概率 | ⚠️ **不是强制**，见下表 |
+| `max_keyword` | 改写出几条搜索关键词 | 未单独观测到差异 |
+| `limit` | 参考网页条数 | 未单独观测到差异 |
 
 > 出处：客户端 `app.asar` → `out/main/node.mjs` 里的 `mimoWebSearch`，原文是
 > `tools: [{ type: "web_search", max_keyword: 3, force_search: true, limit: 5 }]`。
+
+### ⚠️ 搜不搜是**模型自己决定**的，而且不稳定
+
+同一个问题连打 3 次，统计"到底搜没搜"（模型 `mimo-x-flash-preview`，问题「小米 MiMo 是什么？」）：
+
+| 工具声明 | 搜索命中 | 说明 |
+|---|---|---|
+| `{type:"web_search"}` | **0/3** | 裸工具，模型认为不用搜 |
+| `+ force_search:true` | **2/3** | 明显更容易触发，但不是 100% |
+| `+ limit:5, max_keyword:3` | **2/3** | 同上 |
+| 三个都给（客户端同款） | **2/3** | 同上 |
+
+**所以别把 `force_search` 当成"一定联网"**。经验规律：
+
+| 问题类型 | 行为 |
+|---|---|
+| 明显需要时效信息（"今天…"、"最新…"、"搜索：…"） | ✅ 稳定触发（多次实测都搜了） |
+| 模型自认为知道答案（"X 是什么"、"TCP 是什么"） | ⚠️ 看运气；要搜就**在提问里明说"搜索/联网/最新"**，或在工具里带 `force_search` |
+| 完全用不上的（"1+1=?"、"你好"） | ❌ 不搜（这正是我们想要的） |
+
+顺带一提：**注入工具本身几乎不要钱**。给「1+1=?」带上 `tools:[{type:"web_search"}]`，
+实测 `prompt_tokens=11`、耗时 ~600ms，和不带工具一样 —— 因为没触发搜索就没有网页正文进上下文。
+真正贵的是**触发搜索**的那一次：`prompt_tokens` 会从十几涨到 6000~8400。
+
 
 ### ⚠️ 这些写法**不管用**（而且不报错）
 
@@ -168,6 +197,10 @@ delta.tool_calls = [{"index":0,"id":null,"function":{"arguments":"}","name":null
 别急着下"模型不支持联网"的结论。
 
 ### 反代帮你兜住了
+
+**当前默认行为：不主动联网。** 反代只在**你明确要求**时出力 ——
+请求里没提 `web_search`、`tools` 里也没有 `web_search` 的，反代一个字都不改，
+一次搜索都不会发生。
 
 请求体里出现非标准的 `web_search` 键时，反代会把它翻译成标准工具声明
 （`config.yaml` → `server.compat.webSearchFlag`，默认开）：
@@ -222,9 +255,43 @@ delta.tool_calls = [{"index":0,"id":null,"function":{"arguments":"}","name":null
 如果客户端会把搜索开关翻译成它自己的参数（比如 `enable_search`），
 把参数名改成 `web_search` 即可 —— 反代只认这一个键。
 
+**如果客户端连额外参数都不给填** —— 见下一节的 `auto` 档。
+
 ---
 
-## 5. 复现 / 自检
+## 5. 三种模式：联网到底什么时候发生
+
+反代对"要不要联网"有三档，都在 `config.yaml` → `server.compat`：
+
+| 模式 | 配置 | 行为 | 联网何时发生 |
+|---|---|---|---|
+| **off** | `webSearchFlag: false`<br>`webSearchAuto: false` | 一个字都不改 | 只有调用方自己写 `tools:[{type:"web_search"}]` 时 |
+| **flag**（默认） | `webSearchFlag: true`<br>`webSearchAuto: false` | 出现 `web_search` 键才翻译成工具声明 | 调用方写 `web_search: true`（或自己发工具）时 |
+| **auto** | `webSearchAuto: true` | 每个 **TEXT** 聊天请求都注入裸 `tools:[{type:"web_search"}]` | 由**模型自己判断**：时效性问题会搜，`1+1=?` 不会 |
+
+> **所以默认（flag 档）不是"自动联网"**：不写 `web_search` 的请求，一次搜索都不会发生。
+
+`auto` 档实测（真实上游）：
+
+| 请求 | 耗时 | prompt_tokens | 引用 | 说明 |
+|---|---|---|---|---|
+| `1+1=?` | 788ms | 11 | 0 | 不搜，和不加工具时完全一样 |
+| `今天有什么科技新闻？` | 21s | 8216 | 25 | 自己去搜了 |
+| TTS 模型合成语音 | 1218ms | — | — | ✅ 19KB 音频正常，**没被塞工具** |
+| `今天…` + `web_search: false` | 1065ms | 12 | 0 | 单次关掉生效 |
+
+`auto` 档的保护：
+
+- **只对 TEXT 模型注入**。先按目录里的 `modelType` 判断，目录拉不到时按模型名兜底
+  （`tts` / `asr` / `seedream` / `voiceclone` / `voicedesign` / `embedding` 一律跳过）——
+  TTS/ASR 也走 chat/completions，塞工具会坏事。
+- 请求里已经有 `web_search` 工具时不重复添加。
+- 单次想关：请求里写 `"web_search": false`。
+- 环境变量：`XM2API_COMPAT_WEBSEARCH_AUTO=1`。
+
+---
+
+## 6. 复现 / 自检
 
 ```powershell
 npm run caps                        # 菜单选 9：工具调用 / 流式分片 / 联网搜索 三项自检

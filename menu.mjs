@@ -256,7 +256,10 @@ async function doStatus() {
     `    日志      : ${config.logging.enabled ? "开" : "关"}` +
       `，body ${config.logging.captureBody ? "记录" : "不记录"}`
   );
-  console.log(`    兼容层    : web_search 便捷开关 ${config.server.compat.webSearchFlag ? "开" : "关"}`);
+  console.log(
+    `    兼容层    : 翻译 ${config.server.compat.webSearchFlag ? "开" : "关"}` +
+      `，主动注入 ${config.server.compat.webSearchAuto ? "开" : "关"}`
+  );
 
   console.log(c("cyan", "  服务"));
   if (meta) {
