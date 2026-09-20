@@ -79,8 +79,8 @@ print(json.load(urllib.request.urlopen(req))["choices"][0]["message"]["content"]
 |---|---|
 | `POST /v1/chat/completions` | 文本对话 |
 | `POST /v1/images/generations` | **图像生成**（如 `Doubao-Seedream-5.0-pro`，计费） |
-| `POST /v1/audio/speech` | 语音合成（`mimo-v2.5-tts*`，免费） |
-| `POST /v1/audio/transcriptions` | 语音识别（`mimo-v2.5-asr`，免费） |
+| `POST /v1/audio/speech` | 上游有此路径但**未配供应商**（401），TTS 请走 chat/completions |
+| `POST /v1/audio/transcriptions` | 同上，ASR 请走 chat/completions |
 | `POST /route/chat/completions` | 聊天旧路径 |
 | `GET /v1/models` | **从上游 `/api/model/list` 实时拉取**（缓存 5 分钟） |
 | `GET /__xm2api` | 自检 JSON：凭证是否就绪、上游、模型来源 |
@@ -101,9 +101,54 @@ print(json.load(urllib.request.urlopen(req))["choices"][0]["message"]["content"]
 | 类型 | 模型 | 调用方式 |
 |---|---|---|
 | `TEXT` | `mimo-x-pro-preview`、`mimo-x-flash-preview` | `POST /v1/chat/completions` |
-| `TTS` | `mimo-v2.5-tts`、`-voiceclone`、`-voicedesign` | `POST /v1/audio/speech`（免费） |
-| `ASR` | `mimo-v2.5-asr` | `POST /v1/audio/transcriptions`（免费） |
+| `TTS` | `mimo-v2.5-tts`、`-voicedesign`、`-voiceclone` | **也走 `/v1/chat/completions`**，带 `audio` 字段（免费） |
+| `ASR` | `mimo-v2.5-asr` | **也走 `/v1/chat/completions`**，`input_audio` 内容块（免费） |
 | `IMAGE_GENERATION` | `Doubao-Seedream-5.0-pro` | `POST /v1/images/generations`（**计费**） |
+
+⚠️ **TTS / ASR 不要走 `/v1/audio/*`**。上游虽然存在 `/api/route/audio/speech`、
+`/api/route/audio/transcriptions` 两条路径，但它们没有配供应商，会返回
+`401 该模型未指定供应商`。MiMo 客户端自己的实现是走 chat/completions 的
+（原话："chat-completions audio convention"），下面是从客户端源码抄的格式。
+
+一条命令验证全部 7 个模型（除图像外都免费）：
+
+```powershell
+python examples/all-models.py            # 列模型 + 聊天 + TTS + ASR 闭环
+python examples/all-models.py --all-tts   # 再加 voicedesign / voiceclone
+python examples/all-models.py --image     # 再加图像生成（计费 ¥0.21）
+```
+
+### TTS：文本放 `assistant` 角色，音频参数放顶层 `audio`
+
+```python
+{"model": "mimo-v2.5-tts",
+ "messages": [{"role": "assistant", "content": "要合成的文本"}],
+ "audio": {"format": "mp3"}}                    # format: mp3 | wav
+```
+
+音频在响应里：`choices[0].message.audio.data`（base64，MP3）。三个模型的差别：
+
+| 模型 | 音色怎么给 |
+|---|---|
+| `mimo-v2.5-tts` | `audio.voice` 可选（预设音色名） |
+| `mimo-v2.5-tts-voicedesign` | 加一条 `{"role":"user","content":"低沉的中年男声"}` 描述音色 |
+| `mimo-v2.5-tts-voiceclone` | `audio.voice` = 参考音频的 data URL：`"data:audio/mpeg;base64,…"` |
+
+### ASR：音频放 `input_audio` 内容块
+
+```python
+{"model": "mimo-v2.5-asr",
+ "messages": [{"role": "user", "content": [
+     {"type": "input_audio", "input_audio": {"data": "data:audio/mpeg;base64,…"}}]}],
+ "asr_options": {"language": "auto"}}
+```
+
+转写文本在 `choices[0].message.content`，用量见 `usage.prompt_tokens_details.audio_tokens`。
+
+**闭环实测**：TTS 合成"你好，我是小米 MiMo，这是一段语音合成测试。" →
+把得到的 MP3 喂给 ASR → 转写回 `"你好，我是小米Mimo，这是一段语音合成测试。"` ✅
+
+### 图像：`Doubao-Seedream-5.0-pro`
 
 每条自带 `model_type` / `billable` / `description` 等上游字段（OpenAI 客户端会忽略）。
 

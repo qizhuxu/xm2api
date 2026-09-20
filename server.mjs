@@ -49,13 +49,14 @@ const ROUTES = [
     rewrite: () => "/api/route/images/generations",
   },
   {
-    // 语音合成（TTS：mimo-v2.5-tts / -voiceclone / -voicedesign）
+    // 语音合成：上游有这条路径，但当前没配供应商（401 该模型未指定供应商）。
+    // TTS 实际走 chat/completions + audio 字段，见 examples/all-models.py
     match: (p) => p === "/v1/audio/speech",
     target: MIMO_SERVER,
     rewrite: () => "/api/route/audio/speech",
   },
   {
-    // 语音识别（ASR：mimo-v2.5-asr）
+    // 语音识别：同 TTS，实际走 chat/completions + input_audio
     match: (p) => p === "/v1/audio/transcriptions",
     target: MIMO_SERVER,
     rewrite: () => "/api/route/audio/transcriptions",
