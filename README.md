@@ -77,23 +77,60 @@ print(json.load(urllib.request.urlopen(req))["choices"][0]["message"]["content"]
 
 | 路径 | 说明 |
 |---|---|
-| `POST /v1/chat/completions` | 标准入口 |
-| `POST /route/chat/completions` | 等价旧路径 |
+| `POST /v1/chat/completions` | 文本对话 |
+| `POST /v1/images/generations` | **图像生成**（如 `Doubao-Seedream-5.0-pro`，计费） |
+| `POST /v1/audio/speech` | 语音合成（`mimo-v2.5-tts*`，免费） |
+| `POST /v1/audio/transcriptions` | 语音识别（`mimo-v2.5-asr`，免费） |
+| `POST /route/chat/completions` | 聊天旧路径 |
 | `GET /v1/models` | **从上游 `/api/model/list` 实时拉取**（缓存 5 分钟） |
 | `GET /__xm2api` | 自检 JSON：凭证是否就绪、上游、模型来源 |
+
+上游本身就是一套 OpenAI 风格的镜像接口，反代只是把 `/v1/*` 映射过去：
+
+```
+/v1/chat/completions      → /api/route/chat/completions
+/v1/images/generations    → /api/route/images/generations
+/v1/audio/speech          → /api/route/audio/speech
+/v1/audio/transcriptions  → /api/route/audio/transcriptions
+```
 
 ## 模型
 
 `/v1/models` 从上游的 `/api/model/list` 拉取，返回**账号可见的全部模型**（实测 7 个）：
 
-| 类型 | 模型 | 能否用于 `chat/completions` |
+| 类型 | 模型 | 调用方式 |
 |---|---|---|
-| `TEXT` | `mimo-x-pro-preview`、`mimo-x-flash-preview` | ✅ 可以 |
-| `TTS` | `mimo-v2.5-tts`、`mimo-v2.5-tts-voiceclone`、`mimo-v2.5-tts-voicedesign` | ❌ 走各自接口 |
-| `ASR` | `mimo-v2.5-asr` | ❌ |
-| `IMAGE_GENERATION` | `Doubao-Seedream-5.0-pro` | ❌ |
+| `TEXT` | `mimo-x-pro-preview`、`mimo-x-flash-preview` | `POST /v1/chat/completions` |
+| `TTS` | `mimo-v2.5-tts`、`-voiceclone`、`-voicedesign` | `POST /v1/audio/speech`（免费） |
+| `ASR` | `mimo-v2.5-asr` | `POST /v1/audio/transcriptions`（免费） |
+| `IMAGE_GENERATION` | `Doubao-Seedream-5.0-pro` | `POST /v1/images/generations`（**计费**） |
 
 每条自带 `model_type` / `billable` / `description` 等上游字段（OpenAI 客户端会忽略）。
+
+**关于 `Doubao-Seedream-5.0-pro`**：它不是小米的模型，是**字节跳动的 Seedream 5.0 Pro 图像模型**，
+通过小米的 **Mify 网关**（聚合网关，目录里 7 个模型的 `vendorName` 都是 `Mify`）转发。
+实测生成的图片直接落在字节火山引擎的存储上
+（`ark-acg-cn-beijing.tos-cn-beijing.volces.com/...`），响应里 `model` 字段是
+`doubao-seedream-5-0-pro-260628`。
+
+计费（来自目录的 `imageResolutionPrices`）：**1K / 1.5K = ¥0.21 一张，2K = ¥0.42 一张**。
+其余 TTS/ASR 模型 `billable: 0`。
+
+```python
+import json, urllib.request   # 生成一张图（会产生费用）
+req = urllib.request.Request(
+    "http://127.0.0.1:18787/v1/images/generations",
+    data=json.dumps({"model": "Doubao-Seedream-5.0-pro",
+                     "prompt": "一只戴墨镜的橘猫坐在键盘上，扁平插画风",
+                     "size": "1K", "n": 1}).encode(),
+    headers={"content-type": "application/json"},
+)
+r = json.load(urllib.request.urlopen(req, timeout=180))
+print(r["data"][0]["url"])        # 签名 URL，X-Tos-Expires=86400（24 小时）
+```
+
+返回结构：`{model, created, data:[{url, size:"1024x1024", output_format:"jpeg"}], usage:{generated_images:1}}`。
+耗时实测约 **40 秒**。必填只有 `model` 和 `prompt`（少 `prompt` 会 400 `MissingParameter`）。
 
 只想让客户端看到能聊天的：在 `config.yaml` 里设 `server.modelTypes: [TEXT]`。
 想写死清单：`server.models: [mimo-pro, mimo-flash]`。

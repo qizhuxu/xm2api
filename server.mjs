@@ -29,8 +29,6 @@ const HOST = config.server.host;
 const LOG_DIR = config.logging.dir;
 const MIMO_SERVER = config.server.upstream;
 
-/** GET /v1/models 暴露的模型（本地生成，不打上游） */
-
 const ROUTES = [
   {
     // Native SSO path
@@ -43,6 +41,24 @@ const ROUTES = [
     match: (p) => p === "/v1/chat/completions" || p === "/v1/completions",
     target: MIMO_SERVER,
     rewrite: () => "/api/route/chat/completions",
+  },
+  {
+    // 图像生成（上游同样镜像 OpenAI images 接口；模型如 Doubao-Seedream-5.0-pro）
+    match: (p) => p === "/v1/images/generations",
+    target: MIMO_SERVER,
+    rewrite: () => "/api/route/images/generations",
+  },
+  {
+    // 语音合成（TTS：mimo-v2.5-tts / -voiceclone / -voicedesign）
+    match: (p) => p === "/v1/audio/speech",
+    target: MIMO_SERVER,
+    rewrite: () => "/api/route/audio/speech",
+  },
+  {
+    // 语音识别（ASR：mimo-v2.5-asr）
+    match: (p) => p === "/v1/audio/transcriptions",
+    target: MIMO_SERVER,
+    rewrite: () => "/api/route/audio/transcriptions",
   },
   {
     // Other mimo-server endpoints (user info, model catalog, ...)
