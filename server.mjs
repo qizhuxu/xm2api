@@ -8,10 +8,17 @@
  *   调用方不需要任何 API key。
  *
  * 端点：
- *   POST /v1/chat/completions      标准 OpenAI 入口（模型：mimo-pro | mimo-flash）
- *   POST /route/chat/completions   等价旧路径
- *   GET  /v1/models                本地生成，不打上游
+ *   POST /v1/chat/completions      标准 OpenAI 入口
+ *        ├─ tools / tool_choice / parallel_tool_calls → 原生支持（含流式分片）
+ *        ├─ tools:[{type:"web_search"}]               → 上游自带联网搜索，回 annotations + 引用
+ *        └─ response_format: json_object | json_schema → 原生支持
+ *   POST /v1/images/generations    图像（Doubao-Seedream-5.0-pro）
+ *   GET  /v1/models                上游目录 + 能力标注
+ *   GET  /v1/models/{id}           单个模型
  *   GET  /__xm2api                 自检（也响应 / 与 /health）
+ *
+ * 兼容层：请求体里出现非标准 `web_search` 键时翻译成 tools 声明，其余请求逐字节透传。
+ * 详见 docs/tools-and-search.md
  */
 import path from "node:path";
 import fs from "node:fs";
@@ -100,7 +107,21 @@ const FALLBACK_MODELS = [
   { modelName: "mimo-x-flash-preview", modelType: "TEXT", vendorName: "Mify" },
 ];
 
+/**
+ * 按 modelType 标注能力。这些不是猜的，是逐项实测过的（见 docs/tools-and-search.md）：
+ *   TEXT  → 图像输入 / tools / web_search / json_schema / 流式 全部可用
+ *   TTS、ASR → 走的是 chat/completions + 扩展字段，不是 /v1/audio/*
+ */
+const TYPE_CAPS = {
+  TEXT: { api: "/v1/chat/completions", capabilities: ["chat", "streaming", "vision", "tools", "web_search", "json_schema", "reasoning"] },
+  IMAGE_GENERATION: { api: "/v1/images/generations", capabilities: ["image"] },
+  TTS: { api: "/v1/chat/completions", capabilities: ["speech"], via: "chat/completions + audio{format,voice}" },
+  ASR: { api: "/v1/chat/completions", capabilities: ["transcription"], via: "chat/completions + input_audio" },
+};
+
 function toOpenAiModel(m) {
+  const type = String(m.modelType || "").toUpperCase();
+  const caps = TYPE_CAPS[type] || {};
   return {
     id: m.modelName,
     object: "model",
@@ -111,6 +132,15 @@ function toOpenAiModel(m) {
     description: m.description,
     billable: m.billable,
     display_ratio: m.displayRatio,
+    // 反代补充：实测能力 + 该模型该打哪个端点
+    capabilities: caps.capabilities,
+    api: caps.api,
+    via: caps.via,
+    price: m.ratio?.inputPricePerM != null
+      ? { input_per_m: m.ratio.inputPricePerM, output_per_m: m.ratio.outputPricePerM, cached_per_m: m.ratio.cachedPricePerM, currency: "CNY" }
+      : m.ratio?.imageResolutionPrices
+        ? { per_image: Object.fromEntries(m.ratio.imageResolutionPrices.map((p) => [p.tier, p.pricePerImage])), currency: "CNY" }
+        : undefined,
   };
 }
 
@@ -155,6 +185,81 @@ async function resolveModels() {
   return { list: filtered.map(toOpenAiModel), source: "upstream", error: modelsCache.error };
 }
 
+/* ------------------------------------------------ 兼容层：web_search 便捷开关 */
+
+/**
+ * 上游只认 `tools: [{type:"web_search"}]`（可带 max_keyword / force_search / limit）。
+ * 而 `web_search: true`、`web_search: {enable:true}` 这类写法上游**完全忽略** ——
+ * 模型会一本正经地回答"我没有联网能力"。这里把它翻译成标准工具声明。
+ *
+ * 只有请求体里真的出现 `web_search` 键才改写；其余情况返回 null，请求体逐字节透传。
+ */
+const SEARCH_TOOL_KEYS = ["max_keyword", "force_search", "limit"];
+
+function webSearchCompat(bodyBuf, { pathname }) {
+  if (!config.server.compat.webSearchFlag) return null;
+  if (!/(^|\/)chat\/completions$/.test(pathname) && pathname !== "/v1/completions") return null;
+
+  let j;
+  try {
+    j = JSON.parse(bodyBuf.toString("utf8"));
+  } catch {
+    return null; // 不是 JSON（或流式之外的形态），原样转发
+  }
+  if (!j || typeof j !== "object" || !("web_search" in j)) return null;
+
+  const ws = j.web_search;
+  delete j.web_search;
+
+  const tools = Array.isArray(j.tools) ? [...j.tools] : [];
+  const already = tools.some((t) => t && (t.type === "web_search" || t.type === "builtin_web_search"));
+
+  if (ws === false || ws === null) {
+    return { body: Buffer.from(JSON.stringify(j)), rewrites: ["丢掉 web_search=false（上游本来也忽略它）"] };
+  }
+  if (ws !== true && (typeof ws !== "object" || Array.isArray(ws))) return null;
+
+  const tool = { type: "web_search" };
+  if (ws !== true) for (const k of SEARCH_TOOL_KEYS) if (ws[k] !== undefined) tool[k] = ws[k];
+
+  if (already) {
+    return { body: Buffer.from(JSON.stringify(j)), rewrites: ["web_search 键已删除（tools 里本来就有 web_search）"] };
+  }
+  tools.push(tool);
+  j.tools = tools;
+  return {
+    body: Buffer.from(JSON.stringify(j)),
+    rewrites: [`web_search:${JSON.stringify(ws)} → tools += ${JSON.stringify(tool)}`],
+  };
+}
+
+/* ------------------------------------------------ 未匹配端点的友好 404 */
+
+const SUPPORTED = [
+  "POST /v1/chat/completions      （chat / tools / web_search / json_schema / TTS / ASR）",
+  "POST /v1/completions           同 chat/completions",
+  "POST /v1/images/generations    图像生成",
+  "POST /route/chat/completions   等价旧路径",
+  "POST /api/*                    直通上游 mimo-server",
+  "GET  /v1/models                模型清单（含 capabilities / price）",
+  "GET  /v1/models/{id}           单个模型",
+  "GET  /__xm2api                 自检",
+];
+
+function onUnmatched(req, res, pathname) {
+  sendJson(res, 404, {
+    error: {
+      message: `反代没有这条路径：${req.method} ${pathname}`,
+      type: "invalid_request_error",
+      code: "unsupported_endpoint",
+    },
+    supported: SUPPORTED,
+  });
+  return true;
+}
+
+/* ------------------------------------------------ 服务 */
+
 const routeServer = createRouteServer({
   name: "xm2api 线路2 (SSO route)",
   port: PORT,
@@ -164,6 +269,9 @@ const routeServer = createRouteServer({
   logDir: LOG_DIR,
   logPrefix: "path2",
   logging: config.logging,
+  upstreamTimeoutMs: config.server.upstreamTimeoutMs,
+  transform: webSearchCompat,
+  onUnmatched,
   local: [
     {
       method: "GET",
@@ -174,6 +282,32 @@ const routeServer = createRouteServer({
         if (error) body.warning = `上游模型目录刷新失败，可能不是最新：${error}`;
         body.source = source;
         sendJson(res, 200, body);
+      },
+    },
+    {
+      // OpenAI 标准的单模型查询，不少客户端（Cherry Studio / LobeChat 等）会先探这个
+      method: "GET",
+      path: /^\/v1\/models\/[^/]+$/,
+      handler: async (req, res, pathname) => {
+        const id = decodeURIComponent(pathname.slice("/v1/models/".length));
+        const { list, source, error } = await resolveModels();
+        const found = list.find((m) => m.id === id);
+        if (!found) {
+          const ids = list.map((m) => m.id);
+          sendJson(res, 404, {
+            error: {
+              message: `没有这个模型：${id}`,
+              type: "invalid_request_error",
+              code: "model_not_found",
+            },
+            available: ids,
+            hint: "注意反代只暴露上游 /api/model/list 里的模型；模型名区分大小写。",
+            source,
+            warning: error ? `上游目录刷新失败：${error}` : undefined,
+          });
+          return;
+        }
+        sendJson(res, 200, found);
       },
     },
   ],
@@ -190,6 +324,23 @@ const routeServer = createRouteServer({
         endpoint: MIMO_SERVER + "/api/model/list",
         types: config.server.modelTypes,
       },
+      // 实测过的上游能力，别照抄 OpenAI 文档想当然
+      capabilities: {
+        tools: true,                       // function calling，流式分片也正常
+        parallel_tool_calls: true,
+        tool_choice: ["auto", "none", "required", { type: "function", function: { name: "..." } }],
+        web_search: {
+          native: 'tools: [{type:"web_search"}]  →  message.annotations[] + usage.web_search_usage',
+          tool_options: { max_keyword: "改写关键词条数", force_search: "强制先搜再答", limit: "参考网页条数" },
+          compat_flag: config.server.compat.webSearchFlag
+            ? '也接受非标准 web_search: true / {max_keyword,force_search,limit}，由反代翻译'
+            : "已关闭（config.yaml → server.compat.webSearchFlag）",
+        },
+        vision: "content[].type=image_url（data: 或 http(s) 均可）",
+        json_schema: true,
+        stream_options: { include_usage: true },
+        not_supported: ["n>1（400 n is not supported）", "legacy functions/function_call（静默忽略）", "thinking / enable_thinking（无法关闭思维链）"],
+      },
       credentials: session?.routeCookieHeader
         ? { present: true, sid: session.sso?.sid || null, obtainedAt: session.sso?.obtainedAt || null }
         : { present: false, fix: "npm run refresh" },
@@ -200,8 +351,10 @@ const routeServer = createRouteServer({
         `OpenAI base_url:   http://127.0.0.1:${PORT}/v1   (api_key 可填任意字符串)`,
         `Legacy path:       http://127.0.0.1:${PORT}/route/chat/completions`,
         `Meta:              http://127.0.0.1:${PORT}/__xm2api`,
+        `联网搜索:          请求体加 "web_search": true，或 tools:[{type:"web_search"}]`,
+        `工具调用:          tools + tool_choice，用法与 OpenAI 一致`,
         "401 → 刷新凭证:     npm run refresh",
-        "改端口/日志/客户端实现：编辑 config.yaml",
+        "改端口/日志/兼容层：编辑 config.yaml",
       ],
     };
   },

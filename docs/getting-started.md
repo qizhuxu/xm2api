@@ -160,7 +160,8 @@ npm run creds
 服务
   地址              : http://127.0.0.1:18787 ✅ 在跑
   上游              : https://mimo-server-cn.xiaomimimo.com/api/route/chat/completions
-  模型              : mimo-pro, mimo-flash, mimo-x-pro-preview, mimo-x-flash-preview
+  模型来源          : upstream  ← https://mimo-server-cn.xiaomimimo.com/api/model/list
+  模型类型过滤      : 全部
   服务侧凭证        : present=true sid=mimopc
 ```
 
@@ -177,6 +178,7 @@ curl http://127.0.0.1:18787/__xm2api
   "port": 18787,
   "upstream": "https://mimo-server-cn.xiaomimimo.com/api/route/chat/completions",
   "models": { "source": "upstream", "endpoint": "…/api/model/list", "types": [] },
+  "capabilities": { "tools": true, "web_search": { "…": "见 docs/tools-and-search.md" } },
   "credentials": { "present": true, "sid": "mimopc", "obtainedAt": "2026-09-20T14:52:32.039Z" },
   "hint": ["OpenAI base_url:   http://127.0.0.1:18787/v1", "…"]
 }
@@ -184,14 +186,31 @@ curl http://127.0.0.1:18787/__xm2api
 
 只要 `credentials.present` 是 `true`，就能发请求了。
 
-看模型清单（从上游实时拉，含 TEXT/TTS/ASR/图像共 7 个）：
+看模型清单（从上游实时拉，含 TEXT/TTS/ASR/图像共 7 个，附 `capabilities` / `price`）：
 
 ```powershell
 curl http://127.0.0.1:18787/v1/models
+curl http://127.0.0.1:18787/v1/models/mimo-x-flash-preview
 ```
 
 只有 `model_type: TEXT` 的两个（`mimo-x-pro-preview` / `mimo-x-flash-preview`）
 能用于 `chat/completions`。
+
+### 工具调用 / 联网搜索自检
+
+```powershell
+npm run caps        # 等价于菜单选 9
+```
+
+```
+  模型 mimo-pro，共 3 项（工具调用 / 流式分片 / 联网搜索）
+
+  ✅ ① 工具调用                 get_weather({"city": "北京"})  956ms
+  ✅ ② 流式工具分片               6 个分片 → get_weather({"city": "上海"})  886ms
+  ✅ ③ 联网搜索                 25 条引用，web_search_usage={"tool_usage":5,"page_usage":25}  12944ms
+```
+
+怎么用、哪些写法会被上游静默忽略 → **[tools-and-search.md](tools-and-search.md)**
 
 ---
 

@@ -77,13 +77,16 @@ print(json.load(urllib.request.urlopen(req))["choices"][0]["message"]["content"]
 
 | 路径 | 说明 |
 |---|---|
-| `POST /v1/chat/completions` | 文本对话 |
+| `POST /v1/chat/completions` | 文本对话 / 工具调用 / **联网搜索** / TTS / ASR |
 | `POST /v1/images/generations` | **图像生成**（如 `Doubao-Seedream-5.0-pro`，计费） |
 | `POST /v1/audio/speech` | 上游有此路径但**未配供应商**（401），TTS 请走 chat/completions |
 | `POST /v1/audio/transcriptions` | 同上，ASR 请走 chat/completions |
 | `POST /route/chat/completions` | 聊天旧路径 |
-| `GET /v1/models` | **从上游 `/api/model/list` 实时拉取**（缓存 5 分钟） |
-| `GET /__xm2api` | 自检 JSON：凭证是否就绪、上游、模型来源 |
+| `GET /v1/models` | **从上游 `/api/model/list` 实时拉取**（缓存 5 分钟，带 `capabilities` / `price`） |
+| `GET /v1/models/{id}` | 单个模型；不存在时 404 并列出全部可用 id |
+| `GET /__xm2api` | 自检 JSON：凭证、上游、模型来源、**实测能力表** |
+
+未知路径返回 404 时会附上可用端点清单，不会只丢一句 `no route`。
 
 上游本身就是一套 OpenAI 风格的镜像接口，反代只是把 `/v1/*` 映射过去：
 
@@ -92,6 +95,43 @@ print(json.load(urllib.request.urlopen(req))["choices"][0]["message"]["content"]
 /v1/images/generations    → /api/route/images/generations
 /v1/audio/speech          → /api/route/audio/speech
 /v1/audio/transcriptions  → /api/route/audio/transcriptions
+```
+
+## 工具调用 & 联网搜索
+
+**两个模型都原生支持**，用法与 OpenAI 一致 —— 详见 **[docs/tools-and-search.md](docs/tools-and-search.md)**。
+
+```python
+# 函数调用（标准写法，无需任何适配）
+{"model": "mimo-x-flash-preview",
+ "messages": [{"role": "user", "content": "北京天气？"}],
+ "tools": [{"type": "function", "function": {"name": "get_weather", "...": "..."}}]}
+#   → finish_reason: "tool_calls"，流式下按 delta.tool_calls 分片拼接
+
+# 联网搜索：只有这一种写法管用，引用回在 message.annotations
+{"model": "mimo-x-flash-preview",
+ "messages": [{"role": "user", "content": "搜索：今天有什么科技新闻"}],
+ "tools": [{"type": "web_search"}]}
+#   → annotations[].url/title/site_name/summary，usage.web_search_usage{tool_usage,page_usage}
+```
+
+反代额外认一个**非标准便捷开关**（`server.compat.webSearchFlag`，默认开）：
+
+```python
+{"web_search": true}                               # → 自动变成 tools:[{type:"web_search"}]
+{"web_search": {"limit": 5, "force_search": true}} # → 带参数的搜索工具
+```
+
+> ⚠️ `web_search: {enable:true}` / `enable_search:true` / `search:{...}` 这类写法上游是
+> **静默忽略**的：不报错，但模型会一本正经地回答"我没有联网能力"。
+> 反代把 `web_search` 键翻译掉就是为了兜这个坑（日志里记 `rewrites`）。
+> `tools:[{type:"web_search_preview"}]` 则直接 400。**完整实测矩阵见文档。**
+
+一条命令自检 / 演示：
+
+```powershell
+npm run caps                      # 工具调用 + 流式分片 + 联网搜索，三项自检
+python examples/tools-search.py   # 五项演示，含"不管用的写法"对照
 ```
 
 ## 模型
@@ -195,6 +235,9 @@ print(r["data"][0]["url"])        # 签名 URL，X-Tos-Expires=86400（24 小时
 | `XM2API_HOST` | `server.host` | 绑定地址（**别改成 0.0.0.0**） |
 | `XM2API_MIMO_SERVER` | `server.upstream` | 覆盖上游，仅测试用 |
 | `XM2API_SID` | `credentials.sid` | SSO 的 sid |
+| `XM2API_UPSTREAM_TIMEOUT_MS` | `server.upstreamTimeoutMs` | 上游空闲超时 |
+| `XM2API_COMPAT_WEBSEARCH` | `server.compat.webSearchFlag` | `0` 关掉 web_search 翻译 |
+| `XM2API_MODELS_TTL_MS` | — | `/v1/models` 缓存时长（默认 5 分钟） |
 | `XM2API_LOG` | `logging.enabled` | `off` 关闭日志 |
 | `XM2API_LOG_BODY` | `logging.captureBody` | `off` 不记对话内容 |
 | `XM2API_USE_OPENAI` | `client.useOpenAI` | 示例脚本用不用 SDK |
@@ -211,7 +254,11 @@ server:
   host: 127.0.0.1
   port: 18787
   upstream: https://mimo-server-cn.xiaomimimo.com
-  models: [mimo-pro, mimo-flash]     # GET /v1/models 暴露什么
+  models: upstream                   # 或写死 [mimo-x-pro-preview, ...]
+  modelTypes: []                     # 只暴露某类：[TEXT] / [TTS] ...
+  upstreamTimeoutMs: 300000          # 上游空闲超时（图像/搜索单次可跑 10~40s）
+  compat:
+    webSearchFlag: true              # 把非标准 web_search:true 翻译成 tools 声明
 
 credentials:
   sid: mimopc                        # mimopc=聊天 route，passportapi=账号信息
@@ -243,6 +290,8 @@ python examples/chat.py "你好"                    # 按 config.yaml（默认�
 python examples/chat.py "你好" --no-openai        # 零依赖，标准库 urllib
 python examples/chat.py "你好" --stream           # 流式
 python examples/chat.py "你好" --model mimo-flash --max-tokens 1024
+python examples/tools-search.py                   # 工具调用 + 联网搜索（5 项）
+python examples/all-models.py                     # 4 类模型全覆盖（7 个）
 ```
 
 依赖（可选）：`pip install -r requirements.txt`
@@ -291,8 +340,11 @@ node creds.mjs --check        # 只看 cookie 库当前能否复制
 
 - 调用方自带 `Cookie` 时不覆盖；目标 host 不匹配时不注入
 - 请求体**字节级原样转发**——不解析、不加 system prompt、不改任何字段
+  （唯一例外：请求体里出现非标准 `web_search` 键时翻译成 `tools` 声明，
+  可用 `server.compat.webSearchFlag: false` 关掉；已用回显上游比对 sha256 验证其余请求仍逐字节一致）
 - 只改动协议必需的 `host` / `content-length`
-- SSE 逐块透传（不缓冲）；响应状态码/头/体全透传
+- SSE 逐块透传（不缓冲），额外补 `cache-control: no-cache` / `x-accel-buffering: no` 防中间层缓存
+- 响应状态码/头/体全透传
 - 401 不做自动重试 —— 刷新凭证是 `creds.mjs` 的职责
 
 完整流程、函数职责、边界情况、自验证方法 → **[docs/architecture.md](docs/architecture.md)**
@@ -302,26 +354,29 @@ node creds.mjs --check        # 只看 cookie 库当前能否复制
 ## 文件
 
 ```
-config.yaml              所有可调参数（端口 / 上游 / 日志 / 客户端实现）
+config.yaml              所有可调参数（端口 / 上游 / 超时 / 兼容层 / 日志）
 menu.mjs                交互式启停菜单（start.bat 只是它的入口）
 start.bat               双击入口
-server.mjs              入口①：反代服务
+server.mjs              入口①：反代服务（路由表 / 模型目录 / web_search 兼容层）
 creds.mjs               入口②：凭证工具（--ensure / --refresh / --status / --probe / --check）
 lib/
-  upstream.mjs          转发内核：路由 / SSE 透传 / 脱敏日志 / 注入钩子
+  upstream.mjs          转发内核：路由 / SSE 透传 / 脱敏日志 / 注入钩子 / 改写钩子
   config.mjs            config.yaml 加载器（env 覆盖、默认值兜底）
   pipeline.mjs          凭证链路：复制 Cookies → 读账号 → SSO 换 token → 落盘
   chrome-cookie.mjs     路径常量 + cookie/session 读写
 examples/chat.py        客户端示例（openai 包 / 零依赖 HTTP 双实现）
+examples/tools-search.py 工具调用 + 联网搜索五项演示
+examples/all-models.py  4 类模型（7 个）全覆盖
 requirements.txt        examples 的可选依赖（openai + PyYAML）
 docs/getting-started.md 上手教程 + 报错对照表
 docs/architecture.md    架构与数据流详解
+docs/tools-and-search.md 工具调用 / 联网搜索实测矩阵 + 踩坑
 data/                   ⚠️ 凭证（gitignored）
 logs/                   ⚠️ 抓包日志（gitignored）
 ```
 
 `logs/path2-capture-<日期>.jsonl` 每请求一行：状态码、耗时、`x-trace-id`、
-脱敏请求头、`injected`、请求/响应体（各上限 20KB）。
+脱敏请求头、`injected`、`rewrites`、请求/响应体（各上限 20KB）。
 排查问题和向小米上报 `x-trace-id` 时用得上；注意它**完整记录对话内容**。
 
 ---
@@ -339,6 +394,17 @@ XM2API_PORT=18790 npm run serve
 
 **返回 400 `chat_model_not_public`**
 鉴权已通过，只是模型名不在对客清单 → 用 `mimo-pro` / `mimo-flash`。
+
+**模型说"我没有联网能力" / 说"我无法搜索"**
+99% 是参数写法不对 —— 上游只认 `tools: [{"type":"web_search"}]`，
+`enable_search` / `search` / `web_search:{enable:true}` 都是**静默忽略**（不报错）。
+改用反代便捷开关 `{"web_search": true}` 最省事。详见
+**[docs/tools-and-search.md](docs/tools-and-search.md)**。先跑 `npm run caps` 确认工具本身可用。
+
+**工具调用没反应 / `finish_reason` 不是 `tool_calls`**
+先确认用的是 `tools`（新接口）而不是旧版 `functions` —— `functions` / `function_call`
+上游不报错但**完全不生效**。另外 `tools[].type` 必须是 `"function"`，
+写 `web_search_preview` 之类会 400。
 
 **`content` 是 null 但 `reasoning_content` 有内容**
 推理模型 + `max_tokens` 不够。实测思维链占 200–400 token，`128` 必空、`256` 偶尔空。

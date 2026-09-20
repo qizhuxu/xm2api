@@ -27,6 +27,24 @@ server:
   # 例：只想让客户端看到能用于 chat/completions 的模型，就填 [TEXT]
   modelTypes: []
 
+  # 上游多久没响应算超时（毫秒）。流式是按"空闲"计时，有分片就重置。
+  # 图像生成单次约 40 秒，联网搜索 5~13 秒，所以给足 5 分钟。
+  # 环境变量：XM2API_UPSTREAM_TIMEOUT_MS
+  upstreamTimeoutMs: 300000
+
+  # 请求体兼容层。反代默认逐字节透传，只有命中下面这条规则才会改写。
+  compat:
+    # 上游只认 tools:[{type:"web_search"}] 才会联网；写 web_search:{enable:true}、
+    # enable_search:true、search:{...} 都会被上游静默忽略（模型会嘴硬说"我没有联网能力"）。
+    # 打开后：
+    #   {"web_search": true}                            → tools += {"type":"web_search"}
+    #   {"web_search": {"limit":5,"force_search":true}} → tools += {"type":"web_search","limit":5,"force_search":true}
+    #   {"web_search": false}                           → 删掉这个键
+    # 每次改写都会写进日志的 request.rewrites。
+    # 关掉它 = 完全不做任何请求体改写。环境变量：XM2API_COMPAT_WEBSEARCH=0
+    # 详见 docs/tools-and-search.md
+    webSearchFlag: true
+
 credentials:
   # SSO 交换用的 sid：
   #   mimopc       → 聊天 route（默认，反代用这个）

@@ -57,7 +57,9 @@ function printStatus(meta) {
   if (meta) {
     log(`地址              : ${BASE} ✅ 在跑`);
     log(`上游              : ${meta.upstream}`);
-    log(`模型              : ${(meta.models || []).join(", ")}`);
+    const m = meta.models || {};
+    log(`模型来源          : ${m.source || "-"}${m.endpoint ? `  ← ${m.endpoint}` : ""}`);
+    log(`模型类型过滤      : ${m.types?.length ? m.types.join(", ") : "全部"}`);
     log(`服务侧凭证        : present=${meta.credentials?.present} sid=${meta.credentials?.sid ?? "-"}`);
   } else {
     log(`地址              : ${BASE} ❌ 未响应（启动：npm run serve）`);

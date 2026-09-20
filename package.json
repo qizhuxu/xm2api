@@ -13,7 +13,8 @@
     "serve": "node server.mjs",
     "creds": "node creds.mjs",
     "refresh": "node creds.mjs --refresh",
-    "probe": "node creds.mjs --probe"
+    "probe": "node creds.mjs --probe",
+    "caps": "node menu.mjs caps"
   },
   "dependencies": {
     "yaml": "^2.9.1"

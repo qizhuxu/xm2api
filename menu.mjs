@@ -8,6 +8,7 @@
  *   node menu.mjs restart
  *   node menu.mjs status         状态 + 最近一次请求
  *   node menu.mjs probe          健康检查
+ *   node menu.mjs caps           能力自检（工具调用 / 流式分片 / 联网搜索）
  *
  * 也可以双击 start.bat（它只是本脚本的入口）。
  */
@@ -147,11 +148,16 @@ async function doStatus() {
   console.log(`    文件      : ${path.relative(ROOT, CONFIG_PATH)}`);
   console.log(`    监听      : ${HOST}:${PORT}`);
   console.log(`    上游      : ${config.server.upstream}`);
-  console.log(`    模型      : ${config.server.models.join(", ")}`);
+  console.log(
+    `    模型      : ${
+      Array.isArray(config.server.models) ? `写死 ${config.server.models.length} 个` : "从上游 /api/model/list 实时拉取"
+    }${config.server.modelTypes.length ? `（只暴露 ${config.server.modelTypes.join("/")}）` : ""}`
+  );
   console.log(
     `    日志      : ${config.logging.enabled ? "开" : "关"}` +
       `，body ${config.logging.captureBody ? "记录" : "不记录"}`
   );
+  console.log(`    兼容层    : web_search 便捷开关 ${config.server.compat.webSearchFlag ? "开" : "关"}`);
 
   console.log(c("cyan", "  服务"));
   if (meta) {
@@ -301,6 +307,117 @@ function doShowLog() {
   }
 }
 
+/* ------------------------------------------------------------------ 能力自检 */
+
+async function chat(body, { stream = false } = {}) {
+  const t0 = Date.now();
+  const res = await fetch(CHAT_URL, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(180000),
+  });
+  const text = await res.text();
+  return { status: res.status, ms: Date.now() - t0, text, stream };
+}
+
+function sseData(text) {
+  const out = [];
+  for (const line of text.split(/\r?\n/)) {
+    const m = /^data:\s*(.*)$/.exec(line);
+    if (!m || m[1] === "[DONE]") continue;
+    try { out.push(JSON.parse(m[1])); } catch {}
+  }
+  return out;
+}
+
+/**
+ * 逐项打上游，验证 tools / web_search 真的能用。
+ * 都是真实计费请求，所以只挑最省的几发（TEXT 模型目前免费额度内）。
+ */
+async function doCaps() {
+  if (!(await serverMeta())) {
+    console.log(`  ${bad("❌ 服务没在运行")} —— 先选 1 启动`);
+    return false;
+  }
+  const model = config.client.model;
+  let pass = 0, fail = 0;
+  const line = (name, okFlag, detail) => {
+    console.log(`  ${okFlag ? ok("✅") : bad("❌")} ${name.padEnd(22)} ${dim(detail)}`);
+    okFlag ? pass++ : fail++;
+  };
+  console.log(dim(`  模型 ${model}，共 3 项（工具调用 / 流式分片 / 联网搜索）\n`));
+
+  const F = {
+    type: "function",
+    function: {
+      name: "get_weather",
+      description: "查询城市天气",
+      parameters: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
+    },
+  };
+
+  // ① 非流式工具调用
+  {
+    const r = await chat({ model, messages: [{ role: "user", content: "北京天气？调用工具。" }], tools: [F], max_tokens: 512 });
+    let j = null;
+    try { j = JSON.parse(r.text); } catch {}
+    const tc = j?.choices?.[0]?.message?.tool_calls?.[0];
+    line(
+      "① 工具调用",
+      r.status === 200 && !!tc,
+      r.status !== 200
+        ? `HTTP ${r.status} ${r.text.slice(0, 90)}`
+        : tc
+          ? `${tc.function.name}(${tc.function.arguments})  ${r.ms}ms`
+          : `没有 tool_calls，finish=${j?.choices?.[0]?.finish_reason}`
+    );
+  }
+
+  // ② 流式工具分片能否拼回完整 arguments
+  {
+    const r = await chat(
+      { model, messages: [{ role: "user", content: "上海天气？调用工具。" }], tools: [F], stream: true, max_tokens: 512 },
+      { stream: true }
+    );
+    const evs = sseData(r.text);
+    const tcs = evs.filter((e) => e.choices?.[0]?.delta?.tool_calls);
+    let name = "", args = "";
+    for (const e of tcs) for (const t of e.choices[0].delta.tool_calls) {
+      if (t.function?.name) name += t.function.name;
+      if (t.function?.arguments) args += t.function.arguments;
+    }
+    let parsed = false;
+    try { JSON.parse(args); parsed = true; } catch {}
+    line(
+      "② 流式工具分片",
+      r.status === 200 && !!name && parsed,
+      r.status !== 200 ? `HTTP ${r.status}` : `${tcs.length} 个分片 → ${name}(${args})  ${r.ms}ms`
+    );
+  }
+
+  // ③ 联网搜索（走反代兼容层，客户端只要写 web_search: true）
+  {
+    const r = await chat({ model, messages: [{ role: "user", content: "搜索：今天有什么科技新闻？" }], web_search: true, max_tokens: 600 });
+    let j = null;
+    try { j = JSON.parse(r.text); } catch {}
+    const ann = j?.choices?.[0]?.message?.annotations || [];
+    const wsu = j?.usage?.web_search_usage;
+    line(
+      "③ 联网搜索",
+      r.status === 200 && ann.length > 0,
+      r.status !== 200
+        ? `HTTP ${r.status} ${r.text.slice(0, 90)}`
+        : ann.length
+          ? `${ann.length} 条引用，web_search_usage=${JSON.stringify(wsu)}  ${r.ms}ms`
+          : `没有 annotations（prompt_tokens=${j?.usage?.prompt_tokens}，可能是没触发搜索）`
+    );
+  }
+
+  console.log("");
+  return fail === 0;
+}
+
 /* ------------------------------------------------------------------ 菜单 */
 
 /** 终端才清屏；管道/重定向时不清，免得往日志里塞控制字符。XM2API_NO_CLEAR=1 可关掉。 */
@@ -327,6 +444,7 @@ async function printHeader() {
   console.log("   3  重启              4  状态 / 最近请求");
   console.log("   5  刷新凭证          6  健康检查");
   console.log("   7  试问一句          8  查看抓包日志");
+  console.log("   9  能力自检（工具调用 / 联网搜索）");
   console.log("   0  退出");
   console.log("");
 }
@@ -340,6 +458,7 @@ const ACTIONS = {
   6: doProbe,
   7: doAsk,
   8: doShowLog,
+  9: doCaps,
 };
 
 /**
@@ -407,6 +526,7 @@ const CLI = {
   probe: doProbe,
   refresh: doRefresh,
   log: doShowLog,
+  caps: doCaps,
 };
 
 if (cmd) {

@@ -93,17 +93,22 @@ OpenAI SDK ──POST /v1/chat/completions──► 127.0.0.1:18787
 
 | 位置 | 函数 | 职责 | 状态 |
 |---|---|---|---|
-| `server.mjs:35` | `ROUTES` | 3 条规则全部指向同一上游：`/route/*`、`/v1/chat/completions`、`/api/*` | 无 |
-| `server.mjs:56` | `readSession()` | 读 `data/sso-session.json`，**每请求实时读** | 无 |
-| `server.mjs:69` | `inject()` | 唯一的凭证动作：加 Cookie | 无 |
-| `upstream.mjs:22` | `pickRoute()` | 路由匹配，首个命中即返回 | 无 |
-| `upstream.mjs:29` | `redactHeaders()` | 日志脱敏（`cookie`/`authorization`/`x-api-key`/`set-cookie` 只留前 8 位） | 无 |
-| `upstream.mjs:43` | `sendJson()` | 本地 JSON 响应 | 无 |
-| `upstream.mjs:61` | `createRouteServer()` | 组装 server，注入 routes / inject / meta / local | 闭包持有配置 |
-| `upstream.mjs:65` | `logEntry()` | 追加一行 JSON，同一份打到 stdout | 无 |
-| `upstream.mjs:73` | `forward()` | 转发核心（第 2、3 步） | 无 |
-| `upstream.mjs:224` | 请求处理器 | CORS / OPTIONS / local / meta / 收 body | 无 |
-| `upstream.mjs:255` | `listen()` | 绑定端口 | 无 |
+| `server.mjs:39` | `ROUTES` | 路由规则表：`/route/*`、`/v1/chat/completions`、`/v1/images/*`、`/v1/audio/*`、`/api/*` | 无 |
+| `server.mjs:79` | `readSession()` | 读 `data/sso-session.json`，**每请求实时读** | 无 |
+| `server.mjs:92` | `inject()` | 唯一的凭证动作：加 Cookie | 无 |
+| `server.mjs:115` | `TYPE_CAPS` | 按 `modelType` 标注实测能力，供 `/v1/models` 用 | 静态表 |
+| `server.mjs:122` | `toOpenAiModel()` | 上游目录 → OpenAI `model` 对象（附 `capabilities` / `price`） | 无 |
+| `server.mjs:163` | `resolveModels()` | 目录缓存（5 分钟）+ 上游失败回落 | 5 分钟缓存 |
+| `server.mjs:199` | `webSearchCompat()` | **兼容层**：`web_search` 键 → `tools` 声明 | 无 |
+| `server.mjs:238` | `SUPPORTED` / `onUnmatched()` | 未匹配路径的 404 + 可用端点清单 | 无 |
+| `upstream.mjs:21` | `pickRoute()` | 路由匹配，首个命中即返回 | 无 |
+| `upstream.mjs:28` | `redactHeaders()` | 日志脱敏（`cookie`/`authorization`/`x-api-key`/`set-cookie` 只留前 8 位） | 无 |
+| `upstream.mjs:42` | `sendJson()` | 本地 JSON 响应 | 无 |
+| `upstream.mjs:65` | `createRouteServer()` | 组装 server，注入 routes / inject / transform / local / meta | 闭包持有配置 |
+| `upstream.mjs:88` | `logEntry()` | 追加一行 JSON，同一份打到 stdout | 无 |
+| `upstream.mjs:103` | `forward()` | 转发核心（含 transform 钩子、SSE 透传、日志） | 无 |
+| `upstream.mjs:280` | 请求处理器 | CORS / OPTIONS / local / meta / 收 body | 无 |
+| `upstream.mjs:311` | `listen()` | 绑定端口 | 无 |
 
 **中间层是无状态转发器**：没有会话池、对话历史、缓存、重试队列、定时器。
 唯一的"记忆"是磁盘上的 `data/sso-session.json`，且每请求重读。
@@ -133,30 +138,60 @@ function inject(headers, target) {
 
 | 不做 | 说明 |
 |---|---|
-| 不解析 / 改写 body | `up.write(bodyBuf)` 原样写出 |
+| 不解析 / 改写 body | `up.write(bodyBuf)` 原样写出（**唯一例外**见下面「兼容层」） |
 | 不加 system prompt | `messages` 原样 |
 | 不加伪装头 | 不发 `X-Mimo-Source` / `X-Client-Version`（实测不需要） |
-| 不改参数 | model / max_tokens / stream / temperature 都不碰 |
+| 不改参数 | model / max_tokens / stream / temperature / tools 都不碰 |
 | **不重试** | 上游 401 原样透传，中间层不"偷偷换 token 再试" |
 | **不刷新 token** | 刷新是 `creds.mjs` 离线跑的，与转发路径解耦 |
 | 不缓存 | 每个请求都真的打上游 |
-| 不改响应 | 状态码 / 响应头 / 响应体全透传 |
+| 不改响应体 | 状态码 / 响应头 / 响应体全透传（SSE 额外补两个防缓存头） |
+
+### 兼容层（唯一的 body 改写）
+
+`server.mjs` 的 `webSearchCompat()` 通过 `createRouteServer({transform})` 挂进转发内核。
+触发条件很窄，全部满足才改写：
+
+1. `server.compat.webSearchFlag` 为真（默认，可关）
+2. 路径是 `*/chat/completions` 或 `/v1/completions`
+3. body 能解析成 JSON **且**含 `web_search` 键
+
+```
+{"web_search": true}                            → tools += {"type":"web_search"}
+{"web_search": {"limit":5,"force_search":true}} → tools += {"type":"web_search","limit":5,"force_search":true}
+{"web_search": false}                           → 只删掉这个键
+tools 里已有 web_search                          → 只删掉这个键，不重复添加
+```
+
+对象形态只取 `max_keyword` / `force_search` / `limit` 三个白名单键。
+改写在 `upstream.mjs` 里发生于 `forward()` 开头，命中时打日志 `rewrites` 并写进
+`request.rewrites`；未命中时 `bodyBuf === rawBody`，仍是原来的 Buffer 直接 `up.write()`。
+
+为什么要这东西：上游只认 `tools:[{type:"web_search"}]`，而 `web_search:{enable:true}` /
+`enable_search` / `search` 这些常见写法会被上游**静默忽略** —— 不报错，模型却会回答
+"我没有联网能力"。把已知会被忽略的参数翻译成能用的形式，是纯增益。
+完整实测见 **[tools-and-search.md](tools-and-search.md)**。
 
 ### 三个隐藏动作
 
-1. **`content-length` 重算**（`upstream.mjs:88`）——header 对象是重新拼的，必须按实际 body 长度写。
-2. **`user-agent` 兜底**（`:89`）——仅在调用方没给时补。SDK 通常自带，很少触发。
-3. **SSE 只留 20KB 副本**（`:131`）——超出部分只转发不记录，避免长回答撑爆日志。
+1. **`content-length` 重算** —— header 对象是重新拼的，必须按实际 body 长度写
+   （兼容层改写后长度会变）。
+2. **`user-agent` 兜底** —— 仅在调用方没给时补。SDK 通常自带，很少触发。
+3. **SSE 只留 20KB 副本** —— 超出部分只转发不记录，避免长回答撑爆日志。
+   另外给 SSE 补 `cache-control: no-cache, no-transform` 与 `x-accel-buffering: no`
+   （防中间层缓冲事件流），并 `socket.setNoDelay(true)` 让分片立刻出网卡；
+   **响应体本身仍逐字节透传**。
 
 ---
 
 ## 5. 边界情况
 
-**上游连不上 / 超时**（`upstream.mjs:205-218`）
+**上游连不上 / 超时**（`upstream.mjs` 的 `up.on('timeout')`）
 
 ```
 up.on('timeout') → up.destroy() → 'error' → 502 + {"error":"upstream_error", detail, target}
-超时上限 120s（UPSTREAM_TIMEOUT_MS，upstream.mjs:18）
+超时上限默认 300s（server.upstreamTimeoutMs / XM2API_UPSTREAM_TIMEOUT_MS）
+流式响应按"空闲"计时：只要还在出分片就不会超时
 ```
 
 **凭证失效**
@@ -184,13 +219,19 @@ $env:XM2API_MIMO_SERVER='http://127.0.0.1:19099'; npm run serve
 # 3) 发一个带标记的请求，两边算 sha256 对比
 ```
 
-实测结果（2026-09 验证）：
+实测结果（2026-09 验证，兼容层加入后复测）：
 
 ```
-客户端发送 265B  sha256=3f8489ad…4deed
-上游收到   265B  sha256=3f8489ad…4deed     字节完全一致
-自定义请求头 x-client-marker 原样保留
+纯文本消息       76B  sha256=12f369104507dd8e  →  上游 76B  一致
+带 tools        212B  sha256=2f61054794be2af0  →  上游 212B 一致
+中文+emoji+转义  114B  sha256=01821add38695e43  →  上游 114B 一致
+自定义请求头     原样保留（x-my-trace 等）
 只有 host / content-length 按协议重算
+
+兼容层对照（只有出现 web_search 键才不一致）：
+web_search:true  74B  →  上游 88B  {"…","tools":[{"type":"web_search"}]}
+web_search:false 75B  →  上游 56B  {"…"}      （键被删掉）
+XM2API_COMPAT_WEBSEARCH=0 时 web_search:true 也是 74B → 74B，完全原样
 ```
 
 注意：回显场景下目标 host 不是 `mimo-server-cn.*`，所以 **Cookie 不会被注入**——
@@ -214,6 +255,7 @@ $env:XM2API_MIMO_SERVER='http://127.0.0.1:19099'; npm run serve
     "upstream": "https://mimo-server-cn.xiaomimimo.com/api/route/chat/completions",
     "headers": { "…": "调用方原始头，敏感项已脱敏" },
     "injected": { "cookie": "serviceT…(396)" },
+    "rewrites": ["web_search:true → tools += {\"type\":\"web_search\"}"],
     "bodyText": "{\"model\":\"mimo-pro\",\"messages\":[…]}"
   },
   "response": {
@@ -225,6 +267,7 @@ $env:XM2API_MIMO_SERVER='http://127.0.0.1:19099'; npm run serve
 ```
 
 用途：排查 401/400、向小米上报 `x-trace-id`、确认注入、量耗时、回看自己发过什么。
+`rewrites` 只在兼容层真的改写了请求体时出现。
 
 两个已知现象：
 
