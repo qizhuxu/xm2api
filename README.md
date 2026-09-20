@@ -1,134 +1,98 @@
-# xm2api
+# xm2api —— 线路2 反代
 
-小米 MiMo 的本地网关集合。**三条互不相同的线路，各自独立目录、独立端口、独立凭证。**
+用桌面客户端自己的账号会话，把小米 MiMo 的 `/api/route/chat/completions` 包成标准
+OpenAI 兼容接口。**不需要 API Key**，不经过客户端进程。
 
-```
-┌─ path2/   线路2：SSO 会话    → mimo-server-cn   /api/route/*   端口 18787
-├─ path3/   线路3：官方 sk- Key → api.xiaomimimo   /v1/*          端口 18789
-├─ facade/  客户端 facade      → 本机 MiMo 客户端  会话/项目/UI    端口 18788
-└─ tools/   归档区：诊断 / 基准 / 逆向 / 测试（日常不用）
-        ↑ 三条线路互不依赖，可单独启停；共用 shared/upstream.mjs 转发内核
-```
-
-## 三条线路的区别
-
-| | **线路2** `path2/` | **线路3** `path3/` | **facade** `facade/` |
-|---|---|---|---|
-| 上游 | `mimo-server-cn.xiaomimimo.com/api/route/*` | `api.xiaomimimo.com/v1/*` | 本机运行中的 MiMo 客户端（Desktop API + 引擎） |
-| 鉴权 | `Cookie: serviceToken=…; userId=…`（代理自动注入） | `Authorization: Bearer sk-…`（代理自动注入，或调用方自带） | 客户端 Desktop token + 引擎 Basic 密码 |
-| 凭证来源 | 客户端 cookie 里的 `passToken` → SSO 两阶段换 `serviceToken` | 平台申请 | 从客户端进程/文件自动发现 |
-| 需要开客户端吗 | **不需要**（仅首次登录/重新登录时需要） | **不需要** | **必须开** |
-| 端口 | 18787 | 18789 | 18788 |
-| 入口 | `POST /v1/chat/completions` | `POST /v1/chat/completions` | `POST /v1/chat/completions` + 网页 UI |
-| 模型名 | `mimo-pro` / `mimo-flash` | 平台清单 | 客户端清单 |
-| 多轮会话 | 无状态，每次带全量 `messages` | 同左 | 有会话复用 |
-| 状态 | ✅ 实测 200 | ✅ 已实现，**待你填入有效 sk- key** | ✅ 可用 |
-
-三条线路**凭证完全独立**：线路2 的 `serviceToken` 打 `/v1` 会被拒（`Invalid API Key`），
-线路3 的 `sk-` key 打 `/api/route/*` 也不认。互不影响。
-
-## 目录结构
-
-```
-xm2api/
-├── path2/                     线路2（SSO）
-│   ├── server.mjs             18787 服务入口
-│   ├── chat.mjs               交互对话 + 凭证自举（--ensure/--refresh/--status/--probe）
-│   ├── start.ps1 / start.bat / console.bat
-│   ├── lib/chrome-cookie.mjs  cookie/session 读写
-│   ├── lib/pipeline.mjs       凭证链路（复制→读账号→换 token→落盘，纯 Node）
-│   ├── docs/cookie-decrypt.md 技术文档（逆向结论 + 实测数据）
-│   └── data/                  ⚠️ 凭证（gitignored）
-├── path3/                     线路3（API Key）
-│   ├── server.mjs             18789 服务入口
-│   ├── lib/apikey.mjs         key 存取 + 校验
-│   ├── scripts/key.mjs        set / test / show / clear
-│   ├── data/                  ⚠️ api-key.json（gitignored）
-│   └── start.bat
-├── facade/                    客户端 facade（18788）
-│   ├── server.mjs  lib/  public/index.html  scripts/
-├── shared/upstream.mjs        共用转发内核（SSE 透传、脱敏日志、注入钩子）
-├── tools/                     归档区：诊断/基准/逆向/测试（见 tools/README.md）
-├── logs/                      ⚠️ 抓包与运行日志（gitignored）
-└── xm2api.bat                 facade 控制台
-```
-
-## 快速开始
-
-**线路2（推荐，开箱即用）**
+## 跑起来
 
 ```powershell
-path2\start.bat            # 菜单：1 启动 / 2 刷新 token / 3 全量刷新 / 6 停止
-npm run path2:serve        # 或直接前台启动 18787
+npm run serve        # 启动反代 → http://127.0.0.1:18787
 ```
 
 ```python
 from openai import OpenAI
 client = OpenAI(base_url="http://127.0.0.1:18787/v1", api_key="xm2api")  # key 会被忽略
-client.chat.completions.create(model="mimo-pro",
-                               messages=[{"role": "user", "content": "你好"}],
-                               max_tokens=256)
+client.chat.completions.create(
+    model="mimo-pro",            # 或 mimo-flash
+    messages=[{"role": "user", "content": "你好"}],
+    max_tokens=256,              # 推理模型：给小了 content 会是空的
+)
 ```
 
-**线路3（需要 sk- key）**
+## 凭证
+
+`data/sso-session.json` 里的 `routeCookieHeader`（`serviceToken` + `userId`），
+由客户端 cookie 库里的 `passToken` 经 SSO 两阶段换得。**每个请求实时读取**，
+换新凭证不需要重启服务。
 
 ```powershell
-path3\start.bat                    # 菜单：2 填 key / 3 验证 / 1 启动
-node path3/scripts/key.mjs set sk-xxxxxxxx
-node path3/scripts/key.mjs test
+node creds/index.mjs               # 查看凭证 + 服务状态
+node creds/index.mjs --ensure      # 确保可用（有效则复用）
+node creds/index.mjs --refresh     # 强制重跑：复制 Cookies → 读账号 → 换 token → 落盘
+node creds/index.mjs --probe       # 打一次请求做健康检查
+node creds/index.mjs --check       # 只看 cookie 库当前能否复制
 ```
 
-```python
-client = OpenAI(base_url="http://127.0.0.1:18789/v1", api_key="sk-xxxxxxxx")
-```
+等价短命令：`npm run creds` / `npm run refresh` / `npm run probe`
 
-**facade（要开客户端）**
-
-```powershell
-xm2api.bat                 # 或 npm run facade
-# 浏览器打开 http://127.0.0.1:18788/
-```
-
-## npm scripts
-
-```powershell
-# 线路2
-npm run path2:start        确保凭证 + 启动 + 冒烟（推荐）
-npm run path2:serve        只启动 18787
-npm run path2:chat         交互对话（内置换凭证）
-npm run path2:creds        只获取/校验凭证
-npm run path2:refresh      强制重跑凭证链路
-npm run path2:status       凭证 + 服务状态
-npm run path2:probe        打一次请求做健康检查
-npm run path2              = start.ps1 -Refresh（全量刷新 + 启动）
-
-# 线路3
-npm run path3:serve        启动 18789
-npm run path3:key          key 管理（set / test / show / clear）
-
-# facade
-npm run facade             启动 18788
-
-# 归档工具（tools/）
-npm run tools:bench        延迟基准
-npm run tools:stream       流式验证
-npm run tools:recon        在客户端 asar 里搜代码
-npm test / test:local / test:ui
-```
-
-## 自检端点
-
-| 端口 | 自检 |
+| 情况 | 处理 |
 |---|---|
-| 18787 | `GET http://127.0.0.1:18787/__xm2api` → 凭证是否就绪、上游、模型清单 |
-| 18789 | `GET http://127.0.0.1:18789/__xm2api` → key 是否就绪；`/__key` 看掩码 |
-| 18788 | `GET http://127.0.0.1:18788/health` |
+| 请求 401 | `node creds/index.mjs --refresh`（**不需要开客户端**，只要 passToken 还在） |
+| `passToken` 过期 / 客户端里退出过登录 | 先在 MiMo 客户端重新登录一次，再 `--refresh` |
+| `--refresh` 提示 cookie 库被锁（EBUSY） | 完全退出 Xiaomi MiMo（含托盘）后重试；否则自动复用上次副本 |
+
+> cookie 库的锁是**动态**的：客户端运行时有时可读、有时独占。`--refresh` 会重试 3 次，
+> 仍失败则回退复用已有副本并告警。
+
+## 端点
+
+| 路径 | 说明 |
+|---|---|
+| `POST /v1/chat/completions` | 标准入口（`mimo-pro` / `mimo-flash`） |
+| `POST /route/chat/completions` | 等价旧路径 |
+| `GET /v1/models` | 本地生成，不打上游 |
+| `GET /__xm2api` | 自检：凭证是否就绪、上游、模型清单 |
+
+模型：`mimo-pro` → 上游 `mimo-x-pro-preview`，`mimo-flash` → `mimo-x-flash-preview`。
+`mimo-auto`、`mimo-v2.5-*` 不在对客清单，会被上游 400 拒绝。
+
+环境变量：`XM2API_PORT`（默认 18787）、`XM2API_HOST`（默认 127.0.0.1）、
+`XM2API_MIMO_SERVER`（覆盖上游，仅测试用）。
+
+## 反代做了什么
+
+只做一件事：给发往 `mimo-server-cn.xiaomimimo.com` 的请求**注入一个 Cookie**。
+
+- 调用方自带 `Cookie` 时不覆盖；目标 host 不匹配时不注入。
+- 请求体**字节级原样转发**（不解析、不加 system prompt、不改任何字段）——
+  已用回显服务器验证：请求体 sha256 一致、自定义头保留、响应原样透传。
+- 只改动协议必需的 `host` / `content-length`。
+- SSE 逐块透传（不缓冲），并在 `logs/path2-capture-<日期>.jsonl` 留脱敏记录。
+
+## 文件
+
+```
+server.mjs              反代服务（18787）
+lib/upstream.mjs        转发内核：路由、SSE 透传、脱敏日志、注入钩子
+creds/                  凭证获取（独立模块，不依赖服务）
+  index.mjs             CLI：--ensure / --refresh / --status / --probe / --check
+  chrome-cookie.mjs     路径常量 + session 读写
+  pipeline.mjs          凭证链路：复制 Cookies → 读账号 → SSO 换 token → 落盘
+data/                   ⚠️ 凭证（gitignored）
+logs/                   ⚠️ 运行日志：只有 path2-capture-<日期>.jsonl（gitignored）
+jiu/                    ⚠️ 归档，已排除 git（path2 旧目录 / path3 / facade / 工具 / 测试 / logs-old）
+```
+
+`logs/` 唯一的活跃文件是 `path2-capture-<日期>.jsonl`：每请求一行 JSON，含状态码、
+耗时、`x-trace-id`、脱敏后的请求头与 `injected`、以及请求/响应体（各上限 20KB）。
+排查"为什么 401/400"和向小米上报 `x-trace-id` 时用得上；它同时会把同样的 JSON
+打到 stdout。注意它**完整记录对话内容**，只是没有入库。
 
 ## ⚠️ 安全
 
-1. **三个服务都没有鉴权**（实测：假 key 也放行）。默认绑 `127.0.0.1`，**不要**改成 `0.0.0.0` 直接暴露公网。
-   远程使用请用 SSH 隧道，或先给对应 server 加 key 校验。
-2. `path2/data/`、`path3/data/`、`logs/` 含账号会话与 API Key，**已在 .gitignore，不要提交、不要外发**。
-3. `path2` 的 `passToken` 等同于账号根凭证；`serviceToken` 会过期（401 时重跑 `path2/start.bat` 的 refresh）。
-4. 线路2 走的是客户端私有接口，不是公开 API，客户端更新后可能需要重新逆向
-   （工具：`npm run path2:recon` / `npm run path2:asar`）。
+1. 服务**没有鉴权**，默认只绑 `127.0.0.1`。不要改成 `0.0.0.0` 暴露公网；
+   远程使用请用 SSH 隧道或自行加 key 校验。
+2. `data/` 里的 `passToken` / `serviceToken` 等同账号会话，**不要外发**。
+   该凭证**不绑 IP**（实测换境外出口仍可用），泄露即可被白用。
+3. 走的是客户端私有接口，不是公开 API；客户端更新后可能需要重新逆向
+   （归档里保留了 `jiu/tools/path2/scan-client.mjs`、`asar-extract.mjs` 等工具）。

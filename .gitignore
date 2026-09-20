@@ -1,34 +1,13 @@
-# ---- 运行期日志 ----
-logs/
-*.log
-lib/logs/
-facade/lib/logs/
+# 归档目录：不纳入 git
+jiu/
 
-# ---- 线路2 凭证与数据（全部敏感）----
-path2/data/
-!path2/data/.gitkeep
-sso-session.json
-chrome-aes-key.bin
-
-# ---- 线路3 密钥 ----
-path3/data/
-!path3/data/.gitkeep
-
-# ---- facade 数据 ----
-facade/data/
-
-# ---- 归档区里的中间产物（可重新生成 / 第三方代码）----
-tools/path2/client-src/
-
-# ---- 其它本地状态 ----
+# 凭证与运行数据
 data/
-*.bin
-*.db
-local-creds.json
-memscan.py
-tool-output/
+!data/.gitkeep
+logs/
 
-# ---- 通用 ----
+# 通用
 node_modules/
 __pycache__/
+*.log
 .DS_Store
