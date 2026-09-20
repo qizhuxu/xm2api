@@ -1,0 +1,61 @@
+# xm2api 配置
+#
+# 改完重启服务生效（凭证相关项下次跑 creds 时生效）。
+# 环境变量优先级高于本文件，见每一节的说明。
+# 只想快速改端口的话：XM2API_PORT=18790 npm run serve
+
+server:
+  # 监听地址。别改成 0.0.0.0 —— 服务没有鉴权
+  # 环境变量：XM2API_HOST
+  host: 127.0.0.1
+
+  # 监听端口
+  # 环境变量：XM2API_PORT
+  port: 18787
+
+  # 上游地址。一般不用动；指向本地回显服务器可用来验证反代是否篡改请求
+  # 环境变量：XM2API_MIMO_SERVER
+  upstream: https://mimo-server-cn.xiaomimimo.com
+
+  # GET /v1/models 暴露的模型名（本地生成，不打上游）
+  # 注意 mimo-pro / mimo-flash 是推理模型，max_tokens 要给够
+  models:
+    - mimo-pro
+    - mimo-flash
+
+credentials:
+  # SSO 交换用的 sid：
+  #   mimopc       → 聊天 route（默认，反代用这个）
+  #   passportapi  → 账号信息
+  # 环境变量：XM2API_SID
+  sid: mimopc
+
+logging:
+  # 关掉就完全不写日志文件，也不往 stdout 打请求详情
+  # 环境变量：XM2API_LOG=off
+  enabled: true
+
+  # 日志目录（相对项目根，或写绝对路径）
+  dir: logs
+
+  # 是否把请求体/响应体写进日志。
+  # false = 只记状态码/耗时/请求头/trace-id，不落对话内容（更隐私，日志更小）
+  # 环境变量：XM2API_LOG_BODY=off
+  captureBody: true
+
+  # 单个 body 的记录上限（字符）。流式响应同样受此限制
+  maxBodyChars: 20000
+
+client:
+  # 客户端示例（examples/chat.py）用哪种实现：
+  #   true  → 用 openai 包（pip install -r requirements.txt）
+  #   false → 用标准库 urllib，零依赖
+  # 环境变量：XM2API_USE_OPENAI=0/1
+  useOpenAI: true
+
+  # 以下四项是 examples/chat.py 的默认参数，也可以用命令行覆盖
+  baseUrl: http://127.0.0.1:18787/v1
+  apiKey: xm2api      # 占位；反代不校验这个值
+  model: mimo-pro
+  maxTokens: 512      # 推理模型建议 ≥512，否则 content 可能是空的
+  stream: true

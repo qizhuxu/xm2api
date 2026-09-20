@@ -1,0 +1,10 @@
+# examples/chat.py 的依赖
+#
+# ⚠️ 如果你的 pip 被配置到失效的镜像（本项目开发机上 pip.ini 指向的清华源返回 403），
+#    加上 -i 参数走官方源：
+#      pip install -r requirements.txt -i https://pypi.org/simple
+#
+# 不想装依赖也可以：python examples/chat.py "你好" --no-openai   （零依赖）
+
+openai>=3
+PyYAML>=6

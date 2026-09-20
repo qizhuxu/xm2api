@@ -5,9 +5,17 @@
   "type": "module",
   "description": "线路2 反代：小米 MiMo SSO 会话 → mimo-server /api/route（本地 OpenAI 兼容入口）",
   "scripts": {
+    "menu": "node menu.mjs",
+    "start": "node menu.mjs start",
+    "stop": "node menu.mjs stop",
+    "restart": "node menu.mjs restart",
+    "status": "node menu.mjs status",
     "serve": "node server.mjs",
-    "creds": "node creds/index.mjs",
-    "refresh": "node creds/index.mjs --refresh",
-    "probe": "node creds/index.mjs --probe"
+    "creds": "node creds.mjs",
+    "refresh": "node creds.mjs --refresh",
+    "probe": "node creds.mjs --probe"
+  },
+  "dependencies": {
+    "yaml": "^2.9.1"
   }
 }

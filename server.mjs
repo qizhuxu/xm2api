@@ -17,20 +17,20 @@ import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createRouteServer, listen, sendJson } from "./lib/upstream.mjs";
-import { SESSION_OUT } from "./creds/chrome-cookie.mjs";
+import { config, CONFIG_PATH } from "./lib/config.mjs";
+import { SESSION_OUT } from "./lib/chrome-cookie.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = __dirname;
 
-const PORT = Number(process.env.XM2API_PORT || 18787);
-const HOST = process.env.XM2API_HOST || "127.0.0.1";
-const LOG_DIR = path.join(PROJECT_ROOT, "logs");
+// 全部来自 config.yaml，可被环境变量覆盖（见 lib/config.mjs）
+const PORT = config.server.port;
+const HOST = config.server.host;
+const LOG_DIR = config.logging.dir;
+const MIMO_SERVER = config.server.upstream;
 
-// 可被 XM2API_MIMO_SERVER 覆盖（仅用于测试/指向自建上游；默认就是官方 route 主机）
-const MIMO_SERVER = process.env.XM2API_MIMO_SERVER || "https://mimo-server-cn.xiaomimimo.com";
-
-/** Models verified to be accepted by the SSO route. */
-const ROUTE_MODELS = ["mimo-pro", "mimo-flash", "mimo-x-pro-preview", "mimo-x-flash-preview"];
+/** GET /v1/models 暴露的模型（本地生成，不打上游） */
+const ROUTE_MODELS = config.server.models;
 
 const ROUTES = [
   {
@@ -81,6 +81,7 @@ const routeServer = createRouteServer({
   inject,
   logDir: LOG_DIR,
   logPrefix: "path2",
+  logging: config.logging,
   local: [
     {
       method: "GET",
@@ -103,13 +104,16 @@ const routeServer = createRouteServer({
       models: ROUTE_MODELS,
       credentials: session?.routeCookieHeader
         ? { present: true, sid: session.sso?.sid || null, obtainedAt: session.sso?.obtainedAt || null }
-        : { present: false, fix: "node creds.mjs --refresh" },
+        : { present: false, fix: "npm run refresh" },
       sessionFile: path.relative(PROJECT_ROOT, SESSION_OUT) || SESSION_OUT,
+      config: { file: path.relative(PROJECT_ROOT, CONFIG_PATH) || CONFIG_PATH, source: config.meta?.source },
+      logging: { enabled: config.logging.enabled, captureBody: config.logging.captureBody },
       hint: [
         `OpenAI base_url:   http://127.0.0.1:${PORT}/v1   (api_key 可填任意字符串)`,
         `Legacy path:       http://127.0.0.1:${PORT}/route/chat/completions`,
         `Meta:              http://127.0.0.1:${PORT}/__xm2api`,
-        "401 → 刷新凭证:     node creds.mjs --refresh",
+        "401 → 刷新凭证:     npm run refresh",
+        "改端口/日志/客户端实现：编辑 config.yaml",
       ],
     };
   },
