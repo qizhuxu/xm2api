@@ -303,6 +303,11 @@ func dispatch(method string, req []byte) []byte {
 
 	case methodRequestNormalize:
 		return handleNormalize(req)
+
+	case methodManagementRegister:
+		return handleManagementRegister(req)
+	case methodManagementHandle:
+		return handleManagement(req)
 	}
 	return errResult("unknown_method", "未实现的方法: "+method, 0)
 }
@@ -345,6 +350,7 @@ func handleRegister(req []byte) []byte {
 			"executor_input_formats":  []string{"chat-completions"},
 			"executor_output_formats": []string{"chat-completions"},
 			"request_normalizer":      true,
+			"management_api":          true,
 		},
 	}
 	return okResult(resp)

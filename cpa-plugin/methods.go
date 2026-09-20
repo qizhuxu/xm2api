@@ -28,6 +28,9 @@ const (
 
 	methodRequestNormalize = "request.normalize"
 
+	methodManagementRegister = "management.register"
+	methodManagementHandle   = "management.handle"
+
 	methodHostHTTPDo          = "host.http.do"
 	methodHostHTTPDoStream    = "host.http.do_stream"
 	methodHostHTTPStreamRead  = "host.http.stream_read"
@@ -35,4 +38,5 @@ const (
 	methodHostStreamEmit      = "host.stream.emit"
 	methodHostStreamClose     = "host.stream.close"
 	methodHostLog             = "host.log"
+	methodHostAuthList        = "host.auth.list"
 )

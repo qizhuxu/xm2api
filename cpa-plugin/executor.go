@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -50,10 +51,79 @@ func (r execRequest) cred() (mimoCred, error) {
 		}
 	}
 	c.normalize()
+	// 插件自己维护的 token 可能比宿主那份新（反应式续期之后），优先用它。
+	// 不这么做的话，每个请求都会拿旧 token 撞一次 401 再续期，白白多跑一轮。
+	if tok := cachedToken(r.AuthID); tok != "" {
+		c.ServiceToken = tok
+	}
 	if c.ServiceToken == "" {
 		return c, fmt.Errorf("凭证缺少 service_token（auth.refresh 可能还没跑过）")
 	}
 	return c, nil
+}
+
+// errRenewFailed 用来把「凭证失效且续不回来」和普通网络故障区分开，
+// 前者要给客户端 401，后者才是 502。
+var errRenewFailed = errors.New("凭证续期失败")
+
+// sendUpstream 发一次上游请求；若被 401 拒绝且手上有 pass_token，
+// 就地重换 serviceToken 并重试一次。
+//
+// 为什么是事件驱动而不是定时：serviceToken 是会话 cookie（Set-Cookie 里没有
+// Expires / Max-Age），没有可依赖的有效期；而失效时上游稳定返回 401（实测
+// 坏 token / 空 token / 无 cookie 三种情况都是 401 + 空 body）。
+// 定时刷新因此只作为兜底。
+func sendUpstream(ctx context.Context, in execRequest, c mimoCred) (*http.Response, error) {
+	client := &http.Client{Timeout: upstreamTimeout}
+
+	req, err := buildUpstream(ctx, in, c)
+	if err != nil {
+		return nil, err
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if res.StatusCode != http.StatusUnauthorized || c.PassToken == "" {
+		return res, nil
+	}
+
+	// 401：token 失效。先读完并关掉这一枪的 body，别把连接吊着。
+	_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 64<<10))
+	res.Body.Close()
+
+	dbg("上游 401，触发反应式续期 (authID=%s)", in.AuthID)
+	sid := c.SID
+	if sid == "" {
+		sid = config().SID
+	}
+	sso, exErr := exchangeServiceToken(sid, c)
+	if exErr != nil {
+		noteReactive(in.AuthID, "", exErr)
+		hostLog("warn", "MiMo serviceToken 被拒且续期失败: "+exErr.Error())
+		return nil, fmt.Errorf("%w: %v", errRenewFailed, exErr)
+	}
+
+	c.ServiceToken = sso.ServiceToken
+	noteReactive(in.AuthID, sso.ServiceToken, nil)
+	// 凭证换新了，模型目录缓存要作废：启动时若凭证是坏的，目录会落到兜底清单，
+	// 不清缓存的话接下来 10 分钟都只有 2 个模型。
+	invalidateModels()
+	hostLog("info", "MiMo serviceToken 被上游拒绝，已自动续期并重试")
+
+	req2, err := buildUpstream(ctx, in, c)
+	if err != nil {
+		return nil, err
+	}
+	return client.Do(req2)
+}
+
+// upstreamFailure 把 sendUpstream 的错误翻译成带正确 http_status 的信封。
+func upstreamFailure(err error) []byte {
+	if errors.Is(err, errRenewFailed) {
+		return errResult("invalid_credential", err.Error(), 401)
+	}
+	return errResult("upstream_unavailable", "上游请求失败: "+err.Error(), 502)
 }
 
 func (r execRequest) body() []byte {
@@ -141,15 +211,11 @@ func handleExecute(req []byte) []byte {
 	ctx, cancel := context.WithTimeout(context.Background(), upstreamTimeout)
 	defer cancel()
 
-	hreq, err := buildUpstream(ctx, in, c)
-	if err != nil {
-		return errResult("internal_error", err.Error(), 500)
-	}
-	dbg("execute -> POST %s", hreq.URL.String())
-	res, err := (&http.Client{Timeout: upstreamTimeout}).Do(hreq)
+	dbg("execute -> POST %s", config().BaseURL+"/api/route/chat/completions")
+	res, err := sendUpstream(ctx, in, c)
 	if err != nil {
 		dbg("execute 上游请求失败: %v", err)
-		return errResult("upstream_unavailable", "上游请求失败: "+err.Error(), 502)
+		return upstreamFailure(err)
 	}
 	defer res.Body.Close()
 	dbg("execute <- HTTP %d ct=%s", res.StatusCode, res.Header.Get("content-type"))
@@ -198,14 +264,10 @@ func handleExecuteStream(req []byte) []byte {
 	}
 
 	// 用 Background：宿主 RPC 返回后 ctx 会被取消，不能挂在它上面。
-	hreq, err := buildUpstream(context.Background(), in, c)
+	res, err := sendUpstream(context.Background(), in, c)
 	if err != nil {
-		return errResult("internal_error", err.Error(), 500)
-	}
-	client := &http.Client{Timeout: upstreamTimeout}
-	res, err := client.Do(hreq)
-	if err != nil {
-		return errResult("upstream_unavailable", "上游请求失败: "+err.Error(), 502)
+		dbg("execute_stream 上游请求失败: %v", err)
+		return upstreamFailure(err)
 	}
 
 	// 还没吐任何 chunk，这里返回错误宿主能正确映射成 HTTP 状态码

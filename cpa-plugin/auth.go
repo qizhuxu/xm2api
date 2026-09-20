@@ -238,13 +238,19 @@ func ssoGetWithCookiesAndCookie(rawURL, cookie string) ([]byte, map[string]strin
 
 /* ------------------------------------------------------- auth.parse / refresh */
 
+// deriveAuthID 是凭证 ID 的唯一来源 —— auth.parse / executor / 状态页必须一致，
+// 否则缓存和状态会对不上号。
+func deriveAuthID(c mimoCred) string {
+	if c.UserID != "" {
+		return providerKey + "-" + c.UserID
+	}
+	return providerKey
+}
+
 func authData(c mimoCred, fileName, id string, next time.Time) map[string]any {
 	storage, _ := json.Marshal(c)
 	if id == "" {
-		id = providerKey
-		if c.UserID != "" {
-			id = providerKey + "-" + c.UserID
-		}
+		id = deriveAuthID(c)
 	}
 	if fileName == "" {
 		fileName = providerKey + ".json"
@@ -307,9 +313,13 @@ func handleAuthParse(req []byte) []byte {
 		next = time.Now().Add(2 * time.Minute)
 	}
 
+	authID := deriveAuthID(c)
+	noteParsed(authID, c.UserID, c.ServiceToken, c.PassToken != "", "auth.parse")
+	dbg("auth.parse id=%s user=%s token=%dB canRenew=%v", authID, c.UserID, len(c.ServiceToken), c.PassToken != "")
+
 	return okResult(map[string]any{
 		"Handled": true,
-		"Auth":    authData(c, in.FileName, "", next),
+		"Auth":    authData(c, in.FileName, authID, next),
 	})
 }
 
@@ -342,6 +352,8 @@ func handleAuthRefresh(req []byte) []byte {
 		if err != nil {
 			// 续期失败：不要立刻重试打爆上游，退避 5 分钟
 			hostLog("warn", "MiMo serviceToken 续期失败: "+err.Error())
+			dbg("auth.refresh 失败 id=%s: %v", in.AuthID, err)
+			noteRefreshFailed(deriveAuthID(c), err)
 			next = time.Now().Add(5 * time.Minute)
 			break
 		}
@@ -349,9 +361,12 @@ func handleAuthRefresh(req []byte) []byte {
 		c.SID = sso.SID
 		c.ObtainedAt = time.Now().UTC().Format(time.RFC3339)
 		hostLog("info", "MiMo serviceToken 已续期")
+		dbg("auth.refresh 成功 id=%s token=%dB", in.AuthID, len(c.ServiceToken))
+		noteParsed(deriveAuthID(c), c.UserID, c.ServiceToken, true, "定时续期")
 	case c.ServiceToken != "":
 		// 只有短凭证，没法续期；给个长周期避免宿主空转
 		hostLog("debug", "凭证里没有 pass_token，跳过续期")
+		noteParsed(deriveAuthID(c), c.UserID, c.ServiceToken, false, "auth文件（不可续期）")
 	default:
 		return errResult("invalid_credential", "凭证既没有 service_token 也没有 pass_token", 401)
 	}

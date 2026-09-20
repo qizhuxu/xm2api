@@ -2,7 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -140,6 +143,65 @@ func TestApplyExclusions(t *testing.T) {
 	setConfig(cfg{ExcludeModels: []string{"Doubao-*", "*-tts"}})
 	if got := applyExclusions(list); len(got) != 2 {
 		t.Fatalf("期望剩 2 个，得到 %d", len(got))
+	}
+}
+
+func TestInvalidateModels(t *testing.T) {
+	mu.Lock()
+	modelCache.at = time.Now()
+	modelCache.models = []modelInfo{{ID: "cached-1"}}
+	mu.Unlock()
+
+	invalidateModels()
+
+	mu.Lock()
+	at := modelCache.at
+	kept := len(modelCache.models)
+	mu.Unlock()
+	if !at.IsZero() {
+		t.Error("时间戳应当被清零，否则缓存仍被视为新鲜")
+	}
+	if kept == 0 {
+		t.Error("不该清空列表 —— 重新拉失败时要能回落到上一份")
+	}
+}
+
+// 这条覆盖的是一个实际撞到过的退化：CPA 启动时 token 恰好失效，
+// model.for_auth 拿到 401，目录退化成两个硬编码模型，而且会一直持续到重启
+// （宿主只在加载凭证时做一次发现）。有了磁盘缓存就不会退化。
+func TestModelDiskCacheRecoversCatalog(t *testing.T) {
+	old := modelsCacheFile
+	modelsCacheFile = filepath.Join(t.TempDir(), "models.json")
+	defer func() { modelsCacheFile = old }()
+
+	// 清掉内存态，模拟刚启动
+	mu.Lock()
+	modelCache.at = time.Time{}
+	modelCache.models = nil
+	mu.Unlock()
+
+	if disk := loadModelsFromDisk(); len(disk) != 0 {
+		t.Fatal("空文件时不该读到内容")
+	}
+
+	good := []modelInfo{{ID: "mimo-x-flash-preview"}, {ID: "mimo-x-pro-preview"}, {ID: "mimo-v2.5-tts"}}
+	saveModelsToDisk(good)
+
+	disk := loadModelsFromDisk()
+	if len(disk) != len(good) {
+		t.Fatalf("往返后 %d 条，期望 %d 条", len(disk), len(good))
+	}
+	if disk[2].ID != "mimo-v2.5-tts" {
+		t.Errorf("内容不对: %+v", disk)
+	}
+
+	// 没凭证时（model.static 的场景）应当走磁盘缓存而不是硬编码兜底
+	got, source, _ := resolveModels("")
+	if source != "disk" {
+		t.Fatalf("来源 = %q，期望 disk", source)
+	}
+	if len(got) != len(good) {
+		t.Fatalf("拿到 %d 条，期望 %d 条", len(got), len(good))
 	}
 }
 
@@ -320,6 +382,112 @@ func TestAuthParseRejectsForeignCredential(t *testing.T) {
 	}
 }
 
+/* ------------------------------------------------------- 管理页 / 状态 */
+
+// 这条是安全底线：状态页和 JSON 都可能被截图/转发，绝不能带 token。
+func TestStatusNeverLeaksToken(t *testing.T) {
+	const secret = "SUPER-SECRET-SERVICE-TOKEN-DO-NOT-LEAK"
+	noteParsed("test-user-1", "u1", secret, true, "单元测试")
+
+	page := renderStatusHTML(collectStatus())
+	if strings.Contains(page, secret) {
+		t.Fatal("HTML 状态页泄漏了 service_token")
+	}
+	if !strings.Contains(page, fmt.Sprintf("%d 字符", len(secret))) {
+		t.Error("页面应当显示 token 长度（用于确认「有 token」但不泄漏内容）")
+	}
+
+	blob, err := json.Marshal(collectStatus())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(blob), secret) {
+		t.Fatal("JSON 状态泄漏了 service_token")
+	}
+	if strings.Contains(string(blob), `"tok"`) {
+		t.Fatal("JSON 里出现了未导出字段 tok")
+	}
+}
+
+func TestCredSnapshotIndependent(t *testing.T) {
+	noteParsed("snap-1", "u", "tok-abc", true, "x")
+	snap := credSnapshot()
+	for i := range snap {
+		if snap[i].AuthID == "snap-1" && snap[i].TokenLen != 7 {
+			t.Errorf("TokenLen = %d, want 7", snap[i].TokenLen)
+		}
+	}
+	// 改快照不该影响存储
+	for i := range snap {
+		snap[i].TokenLen = 999
+	}
+	again := credSnapshot()
+	for _, c := range again {
+		if c.AuthID == "snap-1" && c.TokenLen != 7 {
+			t.Fatal("credSnapshot 返回的应当是拷贝")
+		}
+	}
+}
+
+func TestManagementRegisterShape(t *testing.T) {
+	var env struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Routes []struct {
+				Method string `json:"Method"`
+				Path   string `json:"Path"`
+			} `json:"routes"`
+			Resources []struct {
+				Path string `json:"Path"`
+				Menu string `json:"Menu"`
+			} `json:"resources"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(handleManagementRegister(nil), &env); err != nil {
+		t.Fatal(err)
+	}
+	if !env.OK {
+		t.Fatal("management.register 应当成功")
+	}
+	if len(env.Result.Routes) != 1 || env.Result.Routes[0].Path != "/plugins/mimo/status" {
+		t.Errorf("路由注册不对: %+v", env.Result.Routes)
+	}
+	if len(env.Result.Resources) != 1 || env.Result.Resources[0].Path != "/status" {
+		t.Errorf("资源注册不对: %+v", env.Result.Resources)
+	}
+}
+
+// 资源页走 HTML，管理路由走 JSON —— 这条区分是鉴权边界，不能搞反。
+func TestManagementHandleRoutesByPath(t *testing.T) {
+	pageReq, _ := json.Marshal(map[string]any{"Method": "GET", "Path": "/v0/resource/plugins/mimo/status"})
+	var pageEnv struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Headers map[string][]string `json:"Headers"`
+			Body    []byte              `json:"Body"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(handleManagement(pageReq), &pageEnv); err != nil {
+		t.Fatal(err)
+	}
+	if ct := pageEnv.Result.Headers["content-type"]; len(ct) == 0 || !strings.Contains(ct[0], "text/html") {
+		t.Fatalf("资源页应返回 HTML，得到 %v", pageEnv.Result.Headers)
+	}
+
+	apiReq, _ := json.Marshal(map[string]any{"Method": "GET", "Path": "/v0/management/plugins/mimo/status"})
+	var apiEnv struct {
+		Result struct {
+			Headers map[string][]string `json:"Headers"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(handleManagement(apiReq), &apiEnv); err != nil {
+		t.Fatal(err)
+	}
+	if ct := apiEnv.Result.Headers["content-type"]; len(ct) == 0 || !strings.Contains(ct[0], "application/json") {
+		t.Fatalf("管理路由应返回 JSON，得到 %v", apiEnv.Result.Headers)
+	}
+}
+
 /* ------------------------------------------------- 实网测试（可选开启） */
 
 // TestLiveSSORefresh 直接跑一次真实的 SSO 两阶段交换。
@@ -378,4 +546,70 @@ func TestLiveSSORefresh(t *testing.T) {
 	}
 	// 只报告长度，不打印 token
 	t.Logf("续期成功: service_token=%d 字符, next=%s", len(refreshed.ServiceToken), env.Result.NextRefreshAfter)
+}
+
+// TestLiveReactiveRefresh 验证「上游 401 → 自动续期 → 重试」这条链路。
+//
+// 做法：故意把 service_token 写坏（上游实测会回 401），然后直接调 executor，
+// 期望它自己换完 token 并把请求跑成功。同时确认插件缓存被更新 ——
+// 否则下一个请求还会拿着旧的坏 token 再撞一次 401。
+func TestLiveReactiveRefresh(t *testing.T) {
+	path := os.Getenv("MIMO_AUTH_FILE")
+	if path == "" {
+		t.Skip("未设 MIMO_AUTH_FILE，跳过实网测试")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c mimoCred
+	if err := json.Unmarshal(raw, &c); err != nil {
+		t.Fatal(err)
+	}
+	c.normalize()
+	if c.PassToken == "" {
+		t.Skip("凭证里没有 pass_token，无法测续期")
+	}
+
+	const poisoned = "definitely-not-a-valid-service-token"
+	authID := deriveAuthID(c)
+	c.ServiceToken = poisoned
+	bad, _ := json.Marshal(c)
+
+	req, _ := json.Marshal(map[string]any{
+		"AuthID":      authID,
+		"Model":       "mimo-x-flash-preview",
+		"Format":      "openai",
+		"Payload":     []byte(`{"model":"mimo-x-flash-preview","messages":[{"role":"user","content":"hi"}],"max_tokens":8}`),
+		"StorageJSON": bad,
+	})
+
+	start := time.Now()
+	var env struct {
+		OK     bool `json:"ok"`
+		Error  *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+		Result struct {
+			Payload []byte `json:"Payload"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(handleExecute(req), &env); err != nil {
+		t.Fatal(err)
+	}
+	elapsed := time.Since(start)
+
+	if !env.OK {
+		msg := ""
+		if env.Error != nil {
+			msg = env.Error.Message
+		}
+		t.Fatalf("坏 token 应当被自动续期救回来，实际失败: %s", msg)
+	}
+	t.Logf("坏 token 请求成功（含一次续期+重试），耗时 %s，上游返回 %d 字节", elapsed.Round(time.Millisecond), len(env.Result.Payload))
+
+	if tok := cachedToken(authID); tok == "" || tok == poisoned {
+		t.Fatalf("缓存没被更新（len=%d），下个请求会再撞一次 401", len(tok))
+	}
+	t.Log("插件缓存已更新为续期后的 token")
 }

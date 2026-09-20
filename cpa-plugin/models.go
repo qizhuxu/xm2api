@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -189,43 +191,69 @@ func fetchUpstreamModels(cookie string) ([]upstreamModel, error) {
 	return parsed.Data.Models, nil
 }
 
-// resolveModels 带 TTL 缓存地拿模型清单；上游失败时回落缓存/兜底。
-func resolveModels(cookie string) ([]modelInfo, string) {
-	// ⚠️ modelTTL() 内部会走 config() → mu.RLock()，而 sync.RWMutex 不可重入。
-	// 必须在拿写锁**之前**算好 TTL，否则一旦持锁再调 config() 就是永久死锁
-	// （会把之后所有请求一起拖死，因为写锁再也不释放）。
-	ttl := modelTTL()
-
+// invalidateModels 让下一次 model.for_auth 重新拉上游目录。
+//
+// 凭证换新后必须调用：否则会出现「启动时凭证是坏的 → 目录落到兜底清单（只有 2 个
+// 文本模型）→ 10 分钟缓存把错误状态锁住」——token 早就被反应式续期救回来了，
+// 模型列表却还是残缺的。这不是理论问题，是实测撞到的。
+//
+// 只清时间戳不清列表：重新拉失败时还能回落到上一份，不会变成空列表。
+func invalidateModels() {
 	mu.Lock()
-	cached := modelCache.models
-	at := modelCache.at
+	modelCache.at = time.Time{}
 	mu.Unlock()
 
-	fresh := !at.IsZero() && time.Since(at) < ttl
-	if fresh && len(cached) > 0 {
-		return cached, "cache"
-	}
+	// 顺带清掉上次的错误：它是旧凭证造成的，现在凭证已经换过了，
+	// 留在状态页上会误导（「通常是凭证不可用」——可凭证明明已经好了）。
+	// 重新拉取若再失败，recordModels 会重新记上。
+	modelStore.Lock()
+	modelStore.v.Err = ""
+	modelStore.Unlock()
+}
 
-	// 没有凭证时不要打上游 —— model.static 在凭证加载前就会被调用，
-	// 不带 cookie 问上游必然是 401，白白刷一条 warn。
-	if cookie == "" {
-		if len(cached) > 0 {
-			return cached, "stale"
-		}
-		return fallbackInfos(), "fallback"
-	}
+// 持久化的模型目录缓存。
+//
+// 为什么需要：宿主**只在加载凭证时做一次模型发现**（实测：改插件配置、手动触发
+// auth 刷新都不会重新发现）。所以如果 CPA 启动时 serviceToken 恰好已失效，
+// model.for_auth 会 401，目录就退化成两个硬编码模型，而且这个状态会一直持续到
+// 重启 —— 哪怕第一个请求就已经把 token 反应式续期救回来了。
+//
+// 把「成功拉取过的目录」落盘后，下次启动即使凭证失效也能给出正确的模型列表。
+// 放系统临时目录而不是 CPA 的 auth 目录：host 会扫描 auth 目录下的 .json 当作
+// 凭证文件，往里写缓存会被误当成一条凭证。
+// modelsCacheFile 提成变量是为了让测试能注入临时路径。
+var modelsCacheFile = filepath.Join(os.TempDir(), "mimo-cpa-plugin", "models.json")
 
-	list, err := fetchUpstreamModels(cookie)
-	source := "upstream"
+func modelsCachePath() string { return modelsCacheFile }
+
+func saveModelsToDisk(list []modelInfo) {
+	path := modelsCachePath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		dbg("模型目录缓存创建失败: %v", err)
+		return
+	}
+	raw, err := json.Marshal(list)
 	if err != nil {
-		hostLog("warn", "MiMo 模型目录获取失败: "+err.Error())
-		if len(cached) > 0 {
-			return cached, "stale"
-		}
-		list = fallbackModels
-		source = "fallback"
+		return
 	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		dbg("模型目录缓存写入失败: %v", err)
+	}
+}
 
+func loadModelsFromDisk() []modelInfo {
+	raw, err := os.ReadFile(modelsCachePath())
+	if err != nil {
+		return nil
+	}
+	var list []modelInfo
+	if err := json.Unmarshal(raw, &list); err != nil {
+		return nil
+	}
+	return list
+}
+
+func toInfos(list []upstreamModel) []modelInfo {
 	out := make([]modelInfo, 0, len(list))
 	for _, m := range list {
 		if strings.TrimSpace(m.ModelName) == "" {
@@ -233,18 +261,58 @@ func resolveModels(cookie string) ([]modelInfo, string) {
 		}
 		out = append(out, toModelInfo(m))
 	}
-	if len(out) == 0 {
-		out = fallbackInfos()
-		source = "fallback"
+	return out
+}
+
+// resolveModels 按「内存缓存 → 上游 → 磁盘缓存 → 硬编码兜底」的顺序取模型清单。
+// 第三个返回值是「上游为什么没拿到」，供状态页显示。
+func resolveModels(cookie string) ([]modelInfo, string, error) {
+	// ⚠️ modelTTL() 内部会走 config() → mu.RLock()，而 sync.RWMutex 不可重入。
+	// 必须在拿写锁**之前**算好 TTL，否则一旦持锁再调 config() 就是永久死锁。
+	ttl := modelTTL()
+
+	mu.Lock()
+	cached := modelCache.models
+	at := modelCache.at
+	mu.Unlock()
+
+	if !at.IsZero() && time.Since(at) < ttl && len(cached) > 0 {
+		return cached, "cache", nil
 	}
 
-	if source == "upstream" {
-		mu.Lock()
-		modelCache.at = time.Now()
-		modelCache.models = out
-		mu.Unlock()
+	// 没有凭证时不打上游：model.static 在凭证加载前就会被调用，不带 cookie
+	// 问上游必然是 401。用磁盘上「上次成功拉到的目录」，比硬编码兜底好得多。
+	if cookie == "" {
+		if len(cached) > 0 {
+			return cached, "memory", nil
+		}
+		if disk := loadModelsFromDisk(); len(disk) > 0 {
+			return disk, "disk", nil
+		}
+		return fallbackInfos(), "fallback", nil
 	}
-	return out, source
+
+	list, err := fetchUpstreamModels(cookie)
+	if err == nil {
+		if out := toInfos(list); len(out) > 0 {
+			mu.Lock()
+			modelCache.at = time.Now()
+			modelCache.models = out
+			mu.Unlock()
+			saveModelsToDisk(out)
+			return out, "upstream", nil
+		}
+		err = fmt.Errorf("上游返回了空目录")
+	}
+
+	hostLog("warn", "MiMo 模型目录获取失败: "+err.Error())
+	if len(cached) > 0 {
+		return cached, "stale", err
+	}
+	if disk := loadModelsFromDisk(); len(disk) > 0 {
+		return disk, "disk", err
+	}
+	return fallbackInfos(), "fallback", err
 }
 
 // handleModels 同时服务 model.static 与 model.for_auth。
@@ -268,9 +336,10 @@ func handleModels(method string, req []byte) []byte {
 		}
 	}
 
-	models, source := resolveModels(cookie)
+	models, source, mErr := resolveModels(cookie)
 	// 过滤放在这里而不是缓存里：改了 exclude_models 立刻生效，不用等缓存过期
 	models = applyExclusions(models)
+	recordModels(source, len(models), mErr)
 	hostLog("debug", fmt.Sprintf("MiMo 模型目录: %d 个（来源 %s）", len(models), source))
 
 	return okResult(map[string]any{

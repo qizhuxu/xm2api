@@ -22,6 +22,7 @@
 | `model_provider` | `model.static` / `model.for_auth` | 带凭证从上游 `/api/model/list` 拉目录，10 分钟缓存，失败回落兜底清单 |
 | `executor` | `executor.execute` / `execute_stream` / `count_tokens` | 转发到 `/api/route/chat/completions`，流式走 `host.stream.emit` 真流式 |
 | `request_normalizer` | `request.normalize` | 可选的 web search 自动注入（默认关） |
+| `management_api` | `management.register` / `management.handle` | 管理面板里的「MiMo 凭证」状态页，见第 11 节 |
 
 `auth_provider` 不是可选项 —— **CPA 的硬性要求是插件执行器必须有一条同 provider key 的 auth 记录**（配置注释原文：`Plugin executors require a matching auth record with the same provider key.`）。
 
@@ -100,7 +101,50 @@ api-keys:
 
 > `pass_token` 等同账号密码，别提交到仓库。
 
-### 2.5 验证
+### 2.5 凭证是怎么被处理的
+
+这一节值得单独看 —— 里面每个决定都是实测出来的，不是设计猜想。
+
+**两种 token，角色完全不同：**
+
+| | `pass_token` | `service_token` |
+|---|---|---|
+| 来源 | MiMo 客户端 Chromium Cookies 库 | SSO 两阶段交换换来的 |
+| 寿命 | 长期（等同账号密码） | **会话 cookie** |
+| 作用 | 换 serviceToken | 真正打上游用的 Cookie |
+
+**实测结论一：`serviceToken` 没有任何声明的有效期。**
+SSO 阶段 2 的 `Set-Cookie` 是这样的：
+
+```
+serviceToken = <364 chars>  [Domain=mimo-server-cn.xiaomimimo.com | Path=/ | HttpOnly]
+```
+
+没有 `Expires`，也没有 `Max-Age`。所以**任何"每 N 小时刷新一次"都是在猜**。
+
+**实测结论二：失效时上游返回 `HTTP 401` + 空 body。**
+坏 token / 空 token / 完全不带 cookie 三种情况都试过，一律 401，body 是空字符串。
+
+**于是本插件采用事件驱动为主、定时刷新兜底：**
+
+```
+请求进来 → 用当前 serviceToken 打上游
+              ├─ 200 → 正常返回
+              └─ 401 → 立刻重跑 SSO 交换 → 换上新 token → 自动重试一次
+                          └─ 失败 → 给客户端 401，并在状态页记下原因
+```
+
+`refresh_after`（默认 6h）只是兜底，不再是主要机制。好处是既不依赖猜测的 TTL，也不会在 token 还有效时白白多换一次。
+
+**插件自己维护 token，不只用 auth 文件那份。** 因为 executor 每次拿到的 `StorageJSON` 是宿主存的那份；反应式续期后如果不动缓存，下一个请求又会拿着旧 token 去撞 401，于是每个请求都要多跑一轮 SSO 交换。缓存是插件内存里的，进程重启后自然回到 auth 文件那份，再失效就再续 —— 自愈。
+
+**为什么不把新 token 写回 auth 文件：** 宿主的 `host.auth.save` 需要 auth **文件名**，而 executor 的请求里只有 AuthID，得额外调 `host.auth.list` 反查、猜错了会覆盖别人的凭证文件；收益只是让磁盘上的副本更早跟上，而定时 `auth.refresh` 本来就会同步。不值得。
+
+**顺带修掉的一个退化：** 宿主**只在加载凭证时做一次模型发现**（实测：改插件配置、手动触发 auth 刷新都不会重新发现）。所以如果 CPA 启动时 token 恰好失效，模型目录会退化成两个硬编码模型，而且会一直持续到重启 —— 哪怕第一个请求就已经把 token 救回来了。现在成功拉到的目录会**落盘缓存**（`%TEMP%\mimo-cpa-plugin\models.json`），下次启动即使凭证失效也能给出完整列表。实测：2 个 → 7 个。
+
+> 缓存不写在 CPA 的 auth 目录里 —— 宿主会把那里的 `.json` 当凭证文件扫描，写进去会被误认成一条凭证。
+
+### 2.6 验证
 
 ```powershell
 # 插件是否加载
@@ -243,6 +287,31 @@ CPA 内部对 JSON 字段命名不统一：`sdk/pluginapi` 里多数结构体没
 
 如果想省上游算力，只能在 CPA 侧限制，插件无法感知客户端断开（只能从 `emit` 的返回值反推）。
 
+### 5.10 不要用「定时刷新」去管一个没有有效期的 token
+
+最初我给 `refresh_after` 拍了个 6h。后来实测 SSO 阶段 2 的 `Set-Cookie`：
+
+```
+serviceToken = <364 chars>  [Domain=... | Path=/ | HttpOnly]
+```
+
+**没有 `Expires`，也没有 `Max-Age`** —— 是个纯会话 cookie。所以「多久刷新一次」根本无从推导，纯粹在猜：猜短了白换，猜长了中间那段就是 401。
+
+改成**事件驱动**才是对的：失效时上游稳定返回 `HTTP 401` + 空 body（坏 token / 空 token / 无 cookie 三种都试过），所以「401 就地续期 + 重试一次」既准确又不会白干。定时刷新退居兜底。
+
+配套的一条：**续期后必须更新插件自己的 token 缓存**，否则下一个请求拿到的还是宿主的旧 `StorageJSON`，又要撞一次 401 —— 变成每个请求多跑一轮 SSO 交换。
+
+### 5.11 宿主只在加载凭证时做一次模型发现
+
+实测：改插件配置（触发 `plugin.reconfigure`）、手动 `POST /v0/management/auth-files/refresh`，**都不会**让宿主重新调用 `model.for_auth`。
+
+后果很具体：CPA 启动时若 serviceToken 恰好失效，`model.for_auth` 拿到 401 → 目录退化成兜底清单 → `/v1/models` 只剩 2 个模型，而且**会一直这样直到重启 CPA**，哪怕第一个请求早就把 token 续期救回来了。
+
+插件侧能做的是别让兜底那么难看：把成功拉到的目录**落盘**，启动时先用它。实测同样场景从 2 个模型变成 7 个。真正的重新发现仍然只能靠重启 CPA。
+
+> 落盘位置别选 CPA 的 auth 目录 —— 宿主会扫描那里所有 `.json` 当凭证文件，缓存会被误认成一条凭证。
+
+
 
 ## 6. 源码结构
 
@@ -252,11 +321,13 @@ CPA 内部对 JSON 字段命名不统一：`sdk/pluginapi` 里多数结构体没
 | `bridge.c` | cgo ↔ C 桥：调宿主函数指针、填插件函数表 |
 | `main.go` | ABI 导出、配置、JSON 信封、方法分发 |
 | `auth.go` | `mimoCred`、SSO 两阶段交换、`auth.parse` / `auth.refresh` |
-| `models.go` | 上游目录拉取、`model.static` / `model.for_auth` |
-| `executor.go` | 转发、真流式、`count_tokens`、web search 注入、错误映射 |
+| `creds.go` | 凭证运行时状态与 token 缓存（反应式续期就靠它） |
+| `models.go` | 上游目录拉取、内存+磁盘缓存、`model.static` / `model.for_auth` |
+| `executor.go` | 转发、真流式、401 反应式续期、web search 注入、错误映射 |
+| `management.go` | 管理面板状态页（HTML 资源 + JSON 路由） |
 | `hostcall.go` | `host.*` 回调封装、宽松 JSON 解码 |
 | `debug.go` | 插件内部文件日志 + cookie 脱敏 |
-| `plugin_test.go` | 单元测试 + 可选的实网 SSO 测试 |
+| `plugin_test.go` | 单元测试 + 可选的实网 SSO 与续期测试 |
 | `package.ps1` | Windows 打包（插件商店 release 资产），含 zip 布局校验 |
 | `Makefile` | 同上，给有 make 的环境 / CI 用 |
 
@@ -368,4 +439,27 @@ CPA 在这个接口上有一份**硬编码模型白名单**（`gpt-image-*` / `g
 - `executor.count_tokens` 是按字节数 / 4 的**粗略估算**，上游没有暴露 tokenizer。
 - 插件与 CPA 同进程，是受信任代码。别加载来路不明的动态库。
 - `model.static`（无凭证时）拿不到上游目录，只能吃缓存或两个文本模型的兜底清单；带凭证的 `model.for_auth` 才是完整目录。
+
+## 11. 管理面板
+
+插件声明了 `management_api`，在 CPA 管理面板里加了一个「**MiMo 凭证**」入口。
+
+**两类入口，鉴权边界完全不同**（官方文档明确区分，别搞反）：
+
+| 入口 | 路径 | 鉴权 | 内容 |
+|---|---|---|---|
+| 资源页 | `GET /v0/resource/plugins/mimo/status` | **不走管理鉴权** | 服务端渲染的 HTML，纯展示，无任何 token |
+| 管理 API | `GET /v0/management/plugins/mimo/status` | 需要管理密钥 | 同样的数据，JSON |
+
+页面是自包含 HTML，不加载任何外部脚本或资源；**不含任何 token**（只显示长度），可以放心截图。
+
+能看到的东西：
+
+- **诊断建议**（放在最前面，这才是打开页面的原因）：凭证能不能自动续期、最近为什么失败、模型目录为什么是兜底清单 —— 每条都翻译成「你该怎么办」
+- **凭证（插件视角）**：AuthID、是否可续期、token 有没有/多长、最近换取时间、续期成功/失败次数、这次 token 是**怎么来的**（auth 文件 / 定时续期 / 反应式续期）
+- **凭证（宿主视角）**：`host.auth.list` 的只读视图 —— 宿主认为的 status、是否 disabled/unavailable
+- **模型目录**：来源（upstream / cache / disk / fallback）、数量、更新时间、最近错误
+- **生效配置**
+
+最有用的两个字段是「**来源**」和「**续期次数**」：前者一眼看出 token 是刚换的还是文件里那份；后者里的 reactive 计数直接告诉你「这个 token 已经被上游拒过几次」。
 
