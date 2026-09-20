@@ -52,7 +52,7 @@ OpenAI SDK ──POST /v1/chat/completions──► 127.0.0.1:18787
 │ [1] http.createServer 回调                        lib/upstream.mjs:224         │
 │     · 贴 CORS 头（Access-Control-Allow-Origin: *）                             │
 │     · OPTIONS → 204 直接返回                                                   │
-│     · 查 local 表：GET /v1/models → 本地生成，**不进 forward**                  │
+│     · 查 local 表：GET /v1/models → 拉 /api/model/list（缓存 5 分钟），不进 forward        │
 │     · GET / | /health | /__xm2api → meta() 自检 JSON，**不进 forward**          │
 │     · 其余：req.on('data') 收全 body → forward(req, res, bodyBuf)              │
 └─────────────────────────────────────────────┬─────────────────────────────────┘

@@ -17,11 +17,15 @@ server:
   # 环境变量：XM2API_MIMO_SERVER
   upstream: https://mimo-server-cn.xiaomimimo.com
 
-  # GET /v1/models 暴露的模型名（本地生成，不打上游）
-  # 注意 mimo-pro / mimo-flash 是推理模型，max_tokens 要给够
-  models:
-    - mimo-pro
-    - mimo-flash
+  # GET /v1/models 的模型清单来源：
+  #   upstream      → 从上游 /api/model/list 实时拉取（默认，含全部模型：TEXT/TTS/ASR/图像）
+  #   [a, b, ...]   → 写死一个列表，例如 [mimo-pro, mimo-flash]
+  # 结果缓存 5 分钟（XM2API_MODELS_TTL_MS 可改）；上游失败时回落兜底清单，不会 500
+  models: upstream
+
+  # 只暴露某些类型（留空 = 全部）。可选：TEXT / TTS / ASR / IMAGE_GENERATION
+  # 例：只想让客户端看到能用于 chat/completions 的模型，就填 [TEXT]
+  modelTypes: []
 
 credentials:
   # SSO 交换用的 sid：

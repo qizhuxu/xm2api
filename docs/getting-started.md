@@ -176,13 +176,22 @@ curl http://127.0.0.1:18787/__xm2api
   "name": "xm2api 线路2 (SSO route)",
   "port": 18787,
   "upstream": "https://mimo-server-cn.xiaomimimo.com/api/route/chat/completions",
-  "models": ["mimo-pro", "mimo-flash", "mimo-x-pro-preview", "mimo-x-flash-preview"],
+  "models": { "source": "upstream", "endpoint": "…/api/model/list", "types": [] },
   "credentials": { "present": true, "sid": "mimopc", "obtainedAt": "2026-09-20T14:52:32.039Z" },
   "hint": ["OpenAI base_url:   http://127.0.0.1:18787/v1", "…"]
 }
 ```
 
 只要 `credentials.present` 是 `true`，就能发请求了。
+
+看模型清单（从上游实时拉，含 TEXT/TTS/ASR/图像共 7 个）：
+
+```powershell
+curl http://127.0.0.1:18787/v1/models
+```
+
+只有 `model_type: TEXT` 的两个（`mimo-x-pro-preview` / `mimo-x-flash-preview`）
+能用于 `chat/completions`。
 
 ---
 

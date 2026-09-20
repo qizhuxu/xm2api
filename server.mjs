@@ -30,7 +30,6 @@ const LOG_DIR = config.logging.dir;
 const MIMO_SERVER = config.server.upstream;
 
 /** GET /v1/models 暴露的模型（本地生成，不打上游） */
-const ROUTE_MODELS = config.server.models;
 
 const ROUTES = [
   {
@@ -73,6 +72,72 @@ function inject(headers, target) {
   if (cookie) headers.cookie = cookie;
 }
 
+/* ------------------------------------------------ 模型清单（上游 /api/model/list） */
+
+const MODELS_TTL_MS = Number(process.env.XM2API_MODELS_TTL_MS || 5 * 60 * 1000);
+let modelsCache = { at: 0, list: null, error: null };
+
+/** 兜底清单：上游取不到时用它，保证 /v1/models 不会失败 */
+const FALLBACK_MODELS = [
+  { modelName: "mimo-x-pro-preview", modelType: "TEXT", vendorName: "Mify" },
+  { modelName: "mimo-x-flash-preview", modelType: "TEXT", vendorName: "Mify" },
+];
+
+function toOpenAiModel(m) {
+  return {
+    id: m.modelName,
+    object: "model",
+    created: 1789000000,
+    owned_by: m.vendorName || "xiaomi",
+    // 以下是上游带的、非 OpenAI 标准的补充信息，客户端一般会忽略
+    model_type: m.modelType,
+    description: m.description,
+    billable: m.billable,
+    display_ratio: m.displayRatio,
+  };
+}
+
+/** 带上 SSO cookie 去问上游要目录 */
+async function fetchUpstreamModels() {
+  const cookie = readSession()?.routeCookieHeader;
+  const res = await fetch(`${MIMO_SERVER}/api/model/list`, {
+    headers: cookie ? { cookie, accept: "application/json" } : { accept: "application/json" },
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const j = await res.json();
+  if (j?.code !== 0) throw new Error(`code=${j.code} ${j.message || ""}`.trim());
+  const list = j?.data?.models;
+  if (!Array.isArray(list) || !list.length) throw new Error("上游返回了空目录");
+  return list;
+}
+
+/** 按配置产出模型清单（带 5 分钟缓存；上游失败回落兜底） */
+async function resolveModels() {
+  // 配置里直接写死一个列表
+  if (Array.isArray(config.server.models)) {
+    return { list: config.server.models.map((id) => toOpenAiModel({ modelName: id })), source: "config" };
+  }
+  const now = Date.now();
+  if (!modelsCache.list || now - modelsCache.at > MODELS_TTL_MS) {
+    try {
+      const list = await fetchUpstreamModels();
+      modelsCache = { at: now, list, error: null };
+    } catch (err) {
+      modelsCache = { at: now, list: modelsCache.list, error: err.message };
+      if (!modelsCache.list) {
+        console.error(`[models] 上游目录获取失败，用兜底清单：${err.message}`);
+        return { list: FALLBACK_MODELS.map(toOpenAiModel), source: "fallback", error: err.message };
+      }
+    }
+  }
+  const types = (config.server.modelTypes || []).map((t) => String(t).toUpperCase());
+  const filtered = types.length
+    ? modelsCache.list.filter((m) => types.includes(String(m.modelType).toUpperCase()))
+    : modelsCache.list;
+  return { list: filtered.map(toOpenAiModel), source: "upstream", error: modelsCache.error };
+}
+
 const routeServer = createRouteServer({
   name: "xm2api 线路2 (SSO route)",
   port: PORT,
@@ -86,11 +151,13 @@ const routeServer = createRouteServer({
     {
       method: "GET",
       path: "/v1/models",
-      handler: (req, res) =>
-        sendJson(res, 200, {
-          object: "list",
-          data: ROUTE_MODELS.map((id) => ({ id, object: "model", created: 1789000000, owned_by: "xiaomi" })),
-        }),
+      handler: async (req, res) => {
+        const { list, source, error } = await resolveModels();
+        const body = { object: "list", data: list };
+        if (error) body.warning = `上游模型目录刷新失败，可能不是最新：${error}`;
+        body.source = source;
+        sendJson(res, 200, body);
+      },
     },
   ],
   meta: () => {
@@ -101,7 +168,11 @@ const routeServer = createRouteServer({
       route: "2",
       port: PORT,
       upstream: MIMO_SERVER + "/api/route/chat/completions",
-      models: ROUTE_MODELS,
+      models: {
+        source: Array.isArray(config.server.models) ? "config" : "upstream",
+        endpoint: MIMO_SERVER + "/api/model/list",
+        types: config.server.modelTypes,
+      },
       credentials: session?.routeCookieHeader
         ? { present: true, sid: session.sso?.sid || null, obtainedAt: session.sso?.obtainedAt || null }
         : { present: false, fix: "npm run refresh" },

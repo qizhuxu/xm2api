@@ -79,11 +79,31 @@ print(json.load(urllib.request.urlopen(req))["choices"][0]["message"]["content"]
 |---|---|
 | `POST /v1/chat/completions` | 标准入口 |
 | `POST /route/chat/completions` | 等价旧路径 |
-| `GET /v1/models` | 本地生成，不打上游 |
-| `GET /__xm2api` | 自检 JSON：凭证是否就绪、上游、模型清单 |
+| `GET /v1/models` | **从上游 `/api/model/list` 实时拉取**（缓存 5 分钟） |
+| `GET /__xm2api` | 自检 JSON：凭证是否就绪、上游、模型来源 |
 
-**模型**：`mimo-pro` → 上游 `mimo-x-pro-preview`，`mimo-flash` → `mimo-x-flash-preview`。
-`mimo-auto`、`mimo-v2.5-*` 不在对客清单，会被上游 400 `chat_model_not_public` 拒绝。
+## 模型
+
+`/v1/models` 从上游的 `/api/model/list` 拉取，返回**账号可见的全部模型**（实测 7 个）：
+
+| 类型 | 模型 | 能否用于 `chat/completions` |
+|---|---|---|
+| `TEXT` | `mimo-x-pro-preview`、`mimo-x-flash-preview` | ✅ 可以 |
+| `TTS` | `mimo-v2.5-tts`、`mimo-v2.5-tts-voiceclone`、`mimo-v2.5-tts-voicedesign` | ❌ 走各自接口 |
+| `ASR` | `mimo-v2.5-asr` | ❌ |
+| `IMAGE_GENERATION` | `Doubao-Seedream-5.0-pro` | ❌ |
+
+每条自带 `model_type` / `billable` / `description` 等上游字段（OpenAI 客户端会忽略）。
+
+只想让客户端看到能聊天的：在 `config.yaml` 里设 `server.modelTypes: [TEXT]`。
+想写死清单：`server.models: [mimo-pro, mimo-flash]`。
+
+> 上游目录拉不到时不会 500 —— 会回落到兜底清单并在响应里带 `warning`，
+> 响应还带 `source` 字段标明来源（`upstream` / `config` / `fallback`）。
+>
+> 客户端别名 `mimo-pro` / `mimo-flash` 也仍然可用（上游按别名映射到
+> `mimo-x-pro-preview` / `mimo-x-flash-preview`）；`mimo-auto`、`mimo-v2.5-pro`
+> 不在对客清单，会被上游 400 `chat_model_not_public` 拒绝。
 
 **环境变量**（优先级高于 `config.yaml`）
 
