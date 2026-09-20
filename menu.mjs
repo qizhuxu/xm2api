@@ -293,6 +293,15 @@ function doShowLog() {
 
 /* ------------------------------------------------------------------ 菜单 */
 
+/** 终端才清屏；管道/重定向时不清，免得往日志里塞控制字符。XM2API_NO_CLEAR=1 可关掉。 */
+const WANT_CLEAR = process.stdout.isTTY === true && !process.env.XM2API_NO_CLEAR;
+
+function clearScreen() {
+  if (!WANT_CLEAR) return;
+  // 2J 清屏、3J 清回滚缓冲、H 光标归位
+  process.stdout.write("\x1b[2J\x1b[3J\x1b[H");
+}
+
 async function printHeader() {
   const meta = await serverMeta(1200);
   const creds = credentialsStatus();
@@ -351,6 +360,7 @@ async function interactive() {
   };
 
   for (;;) {
+    clearScreen();
     await printHeader();
     const answer = await ask("  选择: ");
     if (answer === null) {
