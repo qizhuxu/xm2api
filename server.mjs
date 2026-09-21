@@ -136,6 +136,10 @@ function toOpenAiModel(m) {
     capabilities: caps.capabilities,
     api: caps.api,
     via: caps.via,
+    // 推理等级实测：上游根本没实现——low/high 无差异、none 关不掉思考、
+    // 非法值（banana/xhigh）照样 200，链路上没人校验。客户端不显示等级选择器是正常的，
+    // 详见 README「推理等级」一节
+    reasoning_effort: type === "TEXT" ? "unsupported（上游实测忽略，思考固定开启）" : undefined,
     price: m.ratio?.inputPricePerM != null
       ? { input_per_m: m.ratio.inputPricePerM, output_per_m: m.ratio.outputPricePerM, cached_per_m: m.ratio.cachedPricePerM, currency: "CNY" }
       : m.ratio?.imageResolutionPrices
@@ -440,7 +444,7 @@ const routeServer = createRouteServer({
         vision: "content[].type=image_url（data: 或 http(s) 均可）",
         json_schema: true,
         stream_options: { include_usage: true },
-        not_supported: ["n>1（400 n is not supported）", "legacy functions/function_call（静默忽略）", "thinking / enable_thinking（无法关闭思维链）"],
+        not_supported: ["n>1（400 n is not supported）", "legacy functions/function_call（静默忽略）", "thinking / enable_thinking（无法关闭思维链）", "reasoning_effort（low/medium/high 实测无差异、none 也关不掉、非法值照样 200——上游没实现）"],
       },
       credentials: session?.routeCookieHeader
         ? { present: true, sid: session.sso?.sid || null, obtainedAt: session.sso?.obtainedAt || null }
@@ -453,6 +457,7 @@ const routeServer = createRouteServer({
         `Legacy path:       http://127.0.0.1:${PORT}/route/chat/completions`,
         `Meta:              http://127.0.0.1:${PORT}/__xm2api`,
         `联网搜索:          请求体加 "web_search": true，或 tools:[{type:"web_search"}]`,
+        `推理等级:          上游不支持（reasoning_effort 实测无效），客户端无需设置；思考内容照常返回`,
         `工具调用:          tools + tool_choice，用法与 OpenAI 一致`,
         `停止服务:          POST http://127.0.0.1:${PORT}/__xm2api/shutdown（仅本机）`,
         "401 → 刷新凭证:     npm run refresh",

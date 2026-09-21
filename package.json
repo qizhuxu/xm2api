@@ -14,7 +14,8 @@
     "creds": "node creds.mjs",
     "refresh": "node creds.mjs --refresh",
     "probe": "node creds.mjs --probe",
-    "caps": "node menu.mjs caps"
+    "caps": "node menu.mjs caps",
+    "cpa-auth": "node cpa-auth.mjs"
   },
   "dependencies": {
     "yaml": "^2.9.1"

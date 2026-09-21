@@ -186,6 +186,30 @@ python examples/all-models.py --all-tts   # 再加 voicedesign / voiceclone
 python examples/all-models.py --image     # 再加图像生成（计费 ¥0.21）
 ```
 
+### 推理等级：上游没有这个旋钮，客户端不显示是对的
+
+`mimo-x-*` 是推理模型（永远返回 `reasoning_content`），但**上游没有实现推理等级**。
+同一道题（答案 53）实测：
+
+| 请求里的写法 | reasoning_tokens | 结论 |
+|---|---|---|
+| `reasoning_effort:"none"` | 319 | 关不掉，照常思考 |
+| `reasoning:{"effort":"none"}` | 418 | Responses 风格写法同样无效 |
+| `reasoning_effort:"low"` ×3 | 288 / 271 / 274 | 与 high 区间重叠，**无档位差异** |
+| `reasoning_effort:"high"` ×3 | 316 / 332 / 293 | 同上 |
+| `"xhigh"` / `"banana"`（非法值） | 253 / 331，均 HTTP 200 | 非法值不报错 → 链路上没人校验这个参数 |
+
+官方 [Responses API 文档](https://mimo.mi.com/static/docs/api/chat/responses.md) 也明说：
+`low / medium / high` 行为完全相同，细粒度调档 "is not yet supported"。
+而且官方文档讲的是 `api.xiaomimimo.com` + `mimo-v2.5-*`；咱们走的企业镜像路由
+（`mimo-server-cn` + `mimo-x-*`）实测**连官方那半个 `none` 开关都没实现**。
+反代对请求体逐字段透传，`reasoning_effort` 会原样送到上游——只是上游不理。
+
+所以 Cherry Studio 等客户端里这些模型**不显示推理等级选择器是正常的**：
+客户端按内置模型能力库匹配模型 id，`mimo-x-pro-preview` 这类 id 不在库里；
+就算手动塞参数，[Cherry Studio 也会静默过滤](https://github.com/CherryHQ/cherry-studio/issues/11987)。
+思考**内容**（`reasoning_content` 字段 / 流式 delta）不受影响，正常展示。
+
 ### TTS：文本放 `assistant` 角色，音频参数放顶层 `audio`
 
 ```python
@@ -420,16 +444,20 @@ logs/                   ⚠️ 抓包日志（gitignored）
 | | 本仓库的 Node 反代 | `cpa-plugin/` |
 |---|---|---|
 | 进程 | 独立进程，监听 18787 | 无（跑在 CPA 进程内） |
-| 端点数 | 7 个模型 + 图像 + TTS/ASR | 7 个模型 + TTS/ASR（**无图像**） |
-| 凭证 | 读客户端 Chromium Cookies 库 | `mimo.json`（`passToken`，自动续期） |
-| 客户端 | 任何 OpenAI 兼容客户端 | 额外白送 Claude Code / Codex / Gemini 客户端 |
+| 端点数 | 7 个模型 + 图像 + TTS/ASR | 7 个模型 + **图像** + TTS/ASR（2026-09-21 起图像同样可用） |
+| 凭证 | 读客户端 Chromium Cookies 库，过期需手动 `npm run refresh` | `mimo.json`（`passToken`），**401 自动续期重试**；补给路三条：Win 本机 `npm run cpa-auth` 导出上传、官方面板 `#/oauth` SSO 登录（登录页扫码/账号密码双通道）、或 curl 登录接口自动写入 |
+| 剩余用量 | 无 | `quota_provider` 能力：管理 API `/v0/management/quota/fetch` + auth 文件内 `usage_snapshot` |
+| 客户端 | 任何 OpenAI 兼容客户端 | 额外白送 Claude Code / Codex / Gemini 客户端 + CPA 管理面板 |
 
 什么时候用哪个：
 
-- 想给 Cherry Studio 之类**普通客户端**用 → 本 Node 反代更简单，图像也能用。
-- 已经在用 **CLIProxyAPI** 统一管多个上游 → 装插件，少一个进程、少一份凭证副本。
+- 想给 Cherry Studio 之类**普通客户端**用 → 本 Node 反代更简单，凭证工具链也在这一侧（解密客户端 Cookie、导出 `mimo.json` 都靠它）。
+- 已经在用 **CLIProxyAPI** / 要**部署到 Linux 服务器** → 装插件：响应更快（实测明显）、少一个进程、凭证自动续期，图像/语音/用量全覆盖。
+- 两者可并存：Node 反代继续负责凭证导出与本地调试，插件负责对外服务。
 
-详细的编译、部署、能力矩阵和开发踩坑见 [`cpa-plugin/README.md`](cpa-plugin/README.md)。
+详细的编译、部署、能力矩阵、面板 SSO 登录（扫码/账号密码）和开发踩坑见 [`cpa-plugin/README.md`](cpa-plugin/README.md)；
+Linux 部署的认证文件获取方案见其第 12 节（导出脚本 + 服务器侧登录双通道），逆向报告见
+[`investigation-mimo-auth-report.md`](investigation-mimo-auth-report.md)。
 
 ---
 
