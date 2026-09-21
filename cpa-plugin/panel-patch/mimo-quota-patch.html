@@ -1,0 +1,357 @@
+<!--
+  MiMo quota patch for CLIProxyAPI Management Center (v7.3.9 官方面板) — v5
+  ------------------------------------------------------------------
+  v5 修正（Playwright 实测发现）：
+     卡片被 React 重渲染移除后重建时内容为空（placeCard 只建空 div）。
+     v5 用 lastHtml 缓存最近一次渲染结果，重建即恢复；离开/回到 #/quota
+     也直接复用缓存，不再闪回 idle。
+
+  v4 修正（基于真实浏览器 DOM 实测，Playwright 复现用户场景）：
+
+  A. #/quota 卡片位置（v3 的 bug：卡片停在 body 顶部）
+     实测根因：patch 在 <head> 执行 → DOMContentLoaded 时 React 还没渲染
+     QuotaPage → 无 grid → fallback 到 document.body（卡片跑到页面最顶）；
+     且 v3 的 ensureCard()「卡片已在 DOM 就早退」→ 之后永不校正。
+     v4：placeCard() 每次校验父节点，发现不在 grid 就搬进 grid；
+         并用 MutationObserver + 2s 兜底轮询，React 渲染完成后自动归位。
+     实测 DOM：QuotaPage-module__grid___veEj- 是 provider 卡片网格，
+     antigravity 卡片就在其中。
+
+  B. #/auth-files 认证文件卡片内的额度区（对齐 antigravity 案例）
+     实测结构（article.AuthFileCard-module__card 的 children）：
+       antigravity: [HEADER, P.fileName, DIV.health, DIV.metaRow,
+                     DIV.AuthFileQuota-module__quotaSection, FOOTER.actions]
+       mimo:        [HEADER, DIV.health, DIV.metaRow, FOOTER.actions]  ← 缺额度区
+     v4 给 mimo 卡片在 FOOTER 之前注入同结构的 quotaSection（class 名
+     动态取自面板当前的 antigravity 卡片，面板升级换 hash 后缀也不受影响），
+     点击即调插件标准端点并就地渲染剩余量。
+
+  密钥自动捕获（v3 起，实测有效：面板会话密钥被 hook 捕获，零配置）：
+    patch 在 <head> 注入 ⇒ fetch/XHR hook 先于面板 bundle 执行，
+    面板自身请求的 Authorization: Bearer <key> 被记入 window.__mimoMgmtKey。
+
+  数据源：GET /v0/management/plugins/mimo/quota?auth_index=<idx>
+  （插件 quota_provider 标准端点，normalized {subscription/summary/groups}），
+  失败回退 POST /v0/management/quota/fetch。
+
+  上游展望：官方面板若为 supports_quota=true 的插件条目做通用 adapter，
+  本补丁即可退场。
+
+  应用方法（Linux/Windows 通用）：
+    1. config.yaml：remote-management.disable-auto-update-panel: true
+    2. 把本文件整段插入 static/management.html 的 <head> 之后：
+         python3 - <<'EOF'
+         import re
+         p='static/management.html'; patch=open('mimo-quota-patch.html',encoding='utf-8').read()
+         html=open(p,encoding='utf-8').read()
+         assert patch.strip() not in html
+         html,n=re.subn(r'(<head[^>]*>)',lambda m:m.group(1)+'\n'+patch,html,count=1)
+         assert n==1
+         open(p,'w',encoding='utf-8').write(html)
+         EOF
+    3. 硬刷新面板页面（Ctrl+F5；无需重启 CPA）。
+-->
+<style>
+.mq-card{padding:14px 16px;border:1px solid rgba(128,128,128,.35);border-radius:10px;
+  font:13px/1.6 system-ui,-apple-system,sans-serif;background:rgba(128,128,128,.06);margin:0 0 12px}
+.mq-card h3{margin:0 0 8px;font-size:14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.mq-bar{height:8px;border-radius:99px;background:rgba(128,128,128,.25);overflow:hidden;margin:8px 0 4px}
+.mq-bar i{display:block;height:100%;background:#0a7d38;transition:width .3s}
+.mq-tips{color:#888;font-size:12px}
+.mq-card .mq-warn,.mq-inline .mq-warn{color:#b26a00}
+.mq-plan{color:#555;font-size:12px;margin-bottom:4px}
+.mq-btn{border:1px solid rgba(128,128,128,.45);background:transparent;color:inherit;border-radius:8px;
+  padding:4px 12px;font-size:12px;cursor:pointer}
+.mq-btn:hover{background:rgba(128,128,128,.12)}
+.mq-btn[disabled]{opacity:.5;cursor:default}
+.mq-idle{margin-top:6px}
+.mq-inline{font-size:12px;line-height:1.7;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+</style>
+<script>
+/* MiMo quota patch v5 — 见文件头注释。密钥只驻留内存变量，不落盘、不外发。 */
+(function(){
+  if(window.__mimoQuotaPatch) return; window.__mimoQuotaPatch=5;
+
+  /* ================= 1. 会话密钥自动捕获（先于面板 bundle 执行） ================= */
+  var KEY_EVT='mimo-key-captured';
+  function capture(v){
+    if(!v) return;
+    var key=String(v).replace(/^Bearer\s+/i,'').trim();
+    if(!key) return;
+    var isNew=!window.__mimoMgmtKey;
+    window.__mimoMgmtKey=key;
+    if(isNew){ try{ window.dispatchEvent(new Event(KEY_EVT)); }catch(e){} }
+  }
+  try{
+    var of=window.fetch;
+    if(of){
+      window.fetch=function(){
+        try{
+          var h=(arguments[1]&&arguments[1].headers)||null;
+          if(h){
+            var auth=null;
+            if(typeof h.get==='function') auth=h.get('Authorization');
+            else if(Object.prototype.hasOwnProperty.call(h,'Authorization')) auth=h.Authorization;
+            else if(Object.prototype.hasOwnProperty.call(h,'authorization')) auth=h.authorization;
+            if(auth) capture(auth);
+          }
+        }catch(e){}
+        return of.apply(this,arguments);
+      };
+    }
+  }catch(e){}
+  try{
+    var oxh=XMLHttpRequest.prototype.open, osr=XMLHttpRequest.prototype.setRequestHeader;
+    XMLHttpRequest.prototype.open=function(){ return oxh.apply(this,arguments); };
+    XMLHttpRequest.prototype.setRequestHeader=function(k,v){
+      try{ if(k && String(k).toLowerCase()==='authorization') capture(v); }catch(e){}
+      return osr.apply(this,arguments);
+    };
+  }catch(e){}
+
+  /* ================= 2. 基础工具 ================= */
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
+  function isQuotaRoute(){ return /quota/i.test(location.hash||''); }
+  function isAuthRoute(){ return /auth/i.test(location.hash||''); }
+  function tabFilteredOut(){
+    try{
+      var s=sessionStorage.getItem('quotaPage.uiState');
+      if(!s) return false;
+      var o=JSON.parse(s);
+      return !!(o && typeof o.tab==='string' && o.tab && o.tab!=='all');
+    }catch(e){ return false; }
+  }
+  function findKey(){
+    if(window.__mimoMgmtKey) return window.__mimoMgmtKey;
+    try{
+      var v=localStorage.getItem('managementKey');
+      if(v && v.trim() && v.charAt(0)==='m'){ capture(v); return window.__mimoMgmtKey||''; }
+    }catch(e){}
+    return '';
+  }
+  async function fetchQuotaFor(key,authIndex){
+    try{
+      var r=await fetch('/v0/management/plugins/mimo/quota?auth_index='+encodeURIComponent(authIndex),
+        {headers:{'Authorization':'Bearer '+key,'X-Management-Key':key}});
+      var t=await r.text(); var j=null; try{ j=JSON.parse(t); }catch(e){}
+      if(r.ok && j && !j.error) return j;
+    }catch(e){}
+    try{
+      var r2=await fetch('/v0/management/quota/fetch',{method:'POST',
+        headers:{'Authorization':'Bearer '+key,'X-Management-Key':key,'content-type':'application/json'},
+        body:JSON.stringify({auth_index:authIndex})});
+      var t2=await r2.text(); var j2=null; try{ j2=JSON.parse(t2); }catch(e){}
+      if(!j2) return {__error:'HTTP '+r2.status};
+      var q=j2.result||j2;
+      return q&&q.error?{__error:q.error}:q;
+    }catch(e){ return {__error:String(e)}; }
+  }
+  function quotaBits(q){
+    var out={pct:null,win:'',reset:'',desc:'',plan:''};
+    out.plan=(q.subscription&&q.subscription.plan)||'';
+    (q.groups||[]).forEach(function(g){
+      (g.buckets||[]).forEach(function(b){
+        if(out.pct===null && typeof b.remainingFraction==='number'){
+          out.pct=b.remainingFraction*100;
+          out.win=(g.displayName?g.displayName+' · ':'')+(b.window||'');
+          out.reset=b.resetTime||'';
+          out.desc=b.description||'';
+        }
+      });
+    });
+    if(out.pct===null){
+      (q.summary||[]).forEach(function(s){ if(out.pct===null && typeof s.value==='number') out.pct=s.value; });
+    }
+    return out;
+  }
+  async function mimoAuthFiles(key){
+    var af=await fetch('/v0/management/auth-files',{headers:{'Authorization':'Bearer '+key,'X-Management-Key':key}});
+    var txt=await af.text(); var aj=null; try{ aj=JSON.parse(txt); }catch(e){}
+    if(!aj) throw new Error('auth-files HTTP '+af.status);
+    return (aj.files||aj||[]).filter(function(f){ return (f.provider==='mimo'||f.type==='mimo') && !f.runtime_only; });
+  }
+
+  /* ================= 3. #/quota 网格卡片 ================= */
+  var card=null, loaded=false, lastHtml='';
+  function hostGrid(){ return document.querySelector('[class*="QuotaPage-module__grid"]'); }
+  function fallbackHost(){
+    return document.querySelector('[class*="QuotaPage-module__page"]')
+        || document.querySelector('main') || document.body;
+  }
+  /* 幂等：卡片已存在则仅校正父节点（v4 修复 v3 早退 bug）
+     v5：卡片被 React 重建后自动恢复内容（lastHtml 缓存），不再出现空卡片 */
+  function bindCard(el){
+    var rb=el.querySelector('#mqRefreshBtn'); if(rb) rb.onclick=function(){ doRefresh(el); };
+    var ib=el.querySelector('#mqIdleBtn');   if(ib) ib.onclick=function(){ doRefresh(el); };
+  }
+  function placeCard(){
+    var g=hostGrid();
+    if(card && document.body.contains(card)){
+      if(g && card.parentNode!==g) g.appendChild(card);
+      return card;
+    }
+    card=document.createElement('div'); card.className='mq-card';
+    if(g) g.appendChild(card);
+    else { var h=fallbackHost(); h.insertBefore(card,h.firstChild); }
+    if(lastHtml){ card.innerHTML=lastHtml; bindCard(card); }
+    else { renderIdle(card); }
+    return card;
+  }
+  function removeCard(){ if(card&&card.parentNode)card.parentNode.removeChild(card); card=null; }
+
+  function fmtNormalized(name,label,q){
+    var b=quotaBits(q);
+    var h='<div><b>'+esc(name)+'</b> <span class="mq-tips">'+esc(label||'')+'</span></div>';
+    if(b.plan) h+='<div class="mq-plan">套餐：'+esc(b.plan)+'</div>';
+    if(b.pct!==null){
+      h+='<div class="mq-bar"><i style="width:'+Math.max(0,Math.min(100,b.pct)).toFixed(1)+'%"></i></div>';
+      h+='<div>剩余 <b>'+b.pct.toFixed(1)+'%</b>'+(b.win?('　'+esc(b.win)):'')+'</div>';
+      if(b.reset) h+='<div class="mq-tips">重置：'+esc(b.reset)+'</div>';
+      if(b.desc) h+='<div class="mq-tips">'+esc(b.desc)+'</div>';
+    } else {
+      h+='<div class="mq-warn">上游未返回额度数据（新账号无订阅时剩余量即 0）。</div>';
+    }
+    return h;
+  }
+  function renderIdle(el){
+    el.innerHTML='<h3>MiMo (Xiaomi) 剩余使用量</h3>'+
+      '<div class="mq-idle"><button class="mq-btn" id="mqIdleBtn">点击此处刷新额度</button></div>'+
+      '<div class="mq-tips" style="margin-top:6px">与内置 provider 额度卡片同款交互；数据源：'+
+      'GET /v0/management/plugins/mimo/quota（插件 quota_provider 标准端点）。</div>';
+    var btn=el.querySelector('#mqIdleBtn');
+    if(btn) btn.onclick=function(){ doRefresh(el); };
+    lastHtml=el.innerHTML;
+  }
+  async function doRefresh(el){
+    var key=findKey();
+    if(!key){
+      el.innerHTML='<h3>MiMo (Xiaomi) 剩余使用量</h3><div class="mq-warn">'+
+        '正在等待面板会话密钥…若长时间未自动加载，请硬刷新本页（Ctrl+F5），无需任何手动配置。</div>';
+      return;
+    }
+    el.innerHTML='<h3>MiMo (Xiaomi) 剩余使用量</h3><div class="mq-tips">正在加载额度...</div>';
+    try{
+      var files=await mimoAuthFiles(key);
+      var h='<h3>MiMo (Xiaomi) 剩余使用量 <button class="mq-btn" id="mqRefreshBtn">刷新额度</button></h3>';
+      if(!files.length) h+='<div class="mq-tips">auth-files 里没有 mimo 凭证。</div>';
+      for(var i=0;i<files.length;i++){
+        var f=files[i];
+        var q=await fetchQuotaFor(key,f.auth_index||'');
+        var lbl=Array.isArray(f.label)?f.label.join(' | '):f.label;
+        h+= (q&&q.__error)
+          ? '<div><b>'+esc(f.name)+'</b><div class="mq-warn">额度获取失败：'+esc(q.__error)+'</div></div>'
+          : fmtNormalized(f.name,lbl,q||{});
+      }
+      h+='<div class="mq-tips" style="margin-top:6px">数据源：插件 quota_provider（quota.fetch RPC → '+
+         '上游 /api/user/usage，percent=剩余量）；加载后每 60 秒自动刷新。</div>';
+      el.innerHTML=h;
+      loaded=true; lastHtml=h; bindCard(el);
+    }catch(e){
+      el.innerHTML='<h3>MiMo (Xiaomi) 剩余使用量</h3><div class="mq-warn">'+esc(e.message||e)+'</div>';
+      loaded=false; lastHtml='';
+    }
+  }
+
+  /* ================= 4. #/auth-files 卡片内额度区（对齐 antigravity） ================= */
+  function panelQuotaClasses(){
+    /* 动态取面板当前真实 class（面板升级换 hash 后缀也不受影响） */
+    var s=document.querySelector('[class*="AuthFileQuota-module__quotaSection"]');
+    if(!s) return null;
+    var b=s.querySelector('button');
+    return {sec:s.className, btn:b?b.className:''};
+  }
+  function isMimoCard(a){
+    var t=(a.innerText||'').slice(0,90);
+    return /mimo/i.test(t) && !/antigravity/i.test(t);
+  }
+  async function doInline(sec,name){
+    var key=findKey();
+    var cls=panelQuotaClasses()||{btn:''};
+    if(!key){ sec.innerHTML='<div class="mq-inline"><span class="mq-warn">等待面板会话密钥…（硬刷新一次即可）</span></div>'; return; }
+    sec.innerHTML='<div class="mq-inline"><span class="mq-tips">正在加载额度...</span></div>';
+    try{
+      var files=await mimoAuthFiles(key);
+      var f=null;
+      for(var i=0;i<files.length;i++){ if(files[i].name===name){ f=files[i]; break; } }
+      if(!f) f=files[0];
+      if(!f) throw new Error('未找到 mimo 凭证');
+      var q=await fetchQuotaFor(key,f.auth_index||'');
+      if(q&&q.__error) throw new Error(q.__error);
+      var b=quotaBits(q||{});
+      var h='<div class="mq-inline">';
+      if(b.pct!==null){
+        h+='<span>剩余 <b>'+b.pct.toFixed(1)+'%</b>'+(b.win?(' · '+esc(b.win)):'')+(b.reset?(' · 重置 '+esc(b.reset)):'')+'</span>';
+      } else {
+        h+='<span class="mq-warn">上游未返回额度数据</span>';
+      }
+      h+=' <button type="button" class="'+esc(cls.btn)+'">刷新额度</button></div>';
+      sec.innerHTML=h;
+      var btn=sec.querySelector('button');
+      if(btn) btn.onclick=function(){ doInline(sec,name); };
+    }catch(e){
+      sec.innerHTML='<div class="mq-inline"><span class="mq-warn">额度获取失败：'+esc(e.message||e)+'</span>'+
+        ' <button type="button" class="'+esc(cls.btn)+'">重试</button></div>';
+      var btn2=sec.querySelector('button');
+      if(btn2) btn2.onclick=function(){ doInline(sec,name); };
+    }
+  }
+  function injectAuthQuotas(){
+    if(!isAuthRoute()) return;
+    var arts=document.querySelectorAll('article[class*="AuthFileCard-module__card"]');
+    for(var i=0;i<arts.length;i++){
+      var a=arts[i];
+      if(!isMimoCard(a)) continue;
+      if(a.querySelector('[class*="AuthFileQuota-module__quotaSection"]')) continue; /* 幂等 */
+      var cls=panelQuotaClasses()||{sec:'AuthFileQuota-module__quotaSection',btn:''};
+      var sec=document.createElement('div');
+      sec.className=cls.sec; sec.setAttribute('data-mq-inline','1');
+      var name=(function(){
+        var p=a.querySelector('p[class*="AuthFileCard-module__fileName"]');
+        if(p) return (p.textContent||'').trim();
+        var m=(a.innerText||'').match(/([A-Za-z0-9_.\-]+\.json)/);
+        return m?m[1]:'';
+      })();
+      sec.innerHTML='<div class="mq-inline"><button type="button" class="'+esc(cls.btn)+'">点击此处刷新额度</button></div>';
+      var b0=sec.querySelector('button');
+      if(b0) b0.onclick=function(){ doInline(sec,name); };
+      var footer=a.querySelector('footer');
+      if(footer) a.insertBefore(sec,footer); else a.appendChild(sec);
+    }
+  }
+
+  /* ================= 5. 调度（幂等 + 自动归位） ================= */
+  var timer=null;
+  function schedule(){
+    var q=isQuotaRoute(), a=isAuthRoute();
+    if(q && !tabFilteredOut()){
+      placeCard();
+    } else if(card){ removeCard(); }
+    if(a){ injectAuthQuotas(); }
+    else {
+      var inj=document.querySelectorAll('[data-mq-inline]');
+      for(var i=0;i<inj.length;i++){ if(inj[i].parentNode) inj[i].parentNode.removeChild(inj[i]); }
+    }
+    if(timer) clearInterval(timer);
+    timer=setInterval(function(){ if(isQuotaRoute() && !tabFilteredOut() && loaded) doRefresh(placeCard()); },60000);
+  }
+  window.addEventListener(KEY_EVT,function(){
+    if(card && document.body.contains(card) && !loaded && isQuotaRoute() && !tabFilteredOut()) doRefresh(card);
+  });
+  window.addEventListener('hashchange',function(){ setTimeout(schedule,300); });
+  /* React 渲染完成后把卡片归位（幂等，不产生循环：归位后 parentNode===grid） */
+  try{
+    new MutationObserver(function(){
+      if(isQuotaRoute() && !tabFilteredOut() && card && document.body.contains(card)) placeCard();
+      if(isAuthRoute()) injectAuthQuotas();
+    }).observe(document.documentElement,{childList:true,subtree:true});
+  }catch(e){}
+  /* 兜底轮询：覆盖 React 重渲染/路由切换时 observer 尚未触发的窗口 */
+  setInterval(function(){
+    if(isQuotaRoute() && !tabFilteredOut()) placeCard();
+    if(isAuthRoute()) injectAuthQuotas();
+  },2000);
+  if(document.readyState==='loading'){ document.addEventListener('DOMContentLoaded',schedule); }
+  else { schedule(); }
+})();
+</script>

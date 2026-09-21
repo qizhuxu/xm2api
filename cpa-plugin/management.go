@@ -11,14 +11,19 @@ import (
 )
 
 /*
- * management_api 能力：在 CPA 管理面板里给 MiMo 加一个凭证状态页。
+ * management_api 能力。
  *
- * 两类入口，鉴权边界完全不同（官方文档明确区分）：
- *   - 资源页 /v0/resource/plugins/mimo/status —— 浏览器直接打开，**不走管理鉴权**，
- *     所以只能渲染非敏感信息（绝不包含任何 token）。
- *   - 管理路由 GET /v0/management/plugins/mimo/status —— 需要管理密钥，返回 JSON。
+ * 按需求调整（2025-09）：**不再向官方面板注册 plugin-pages 页面**。
+ * 原来的「MiMo 凭证」页面（management.html#/plugin-pages/mimo/0）只有状态展示、
+ * 没有管理功能，用户明确不需要。面板菜单由 management.register 的 resources
+ * 数组生成，这里返回空数组即可让菜单消失。
  *
- * 两边渲染同一份数据，页面是服务端渲染的纯 HTML，不加载任何外部脚本/资源。
+ * 保留的入口：
+ *   - 管理路由 GET /v0/management/plugins/mimo/status —— 需要管理密钥（X-Management-Key
+ *     或 Authorization: Bearer），返回 JSON，供运维 curl 查询。
+ *
+ * renderStatusHTML 与资源页分支保留：单测仍然直接调用它们验证「状态输出绝不泄漏
+ * token」这一安全性质（TestStatusNeverLeaksToken），且后续若加回调登录等功能可复用。
  */
 
 type hostAuthRow struct {
@@ -33,26 +38,40 @@ type hostAuthRow struct {
 }
 
 type statusPayload struct {
-	Plugin      string         `json:"plugin"`
-	Version     string         `json:"version"`
-	Provider    string         `json:"provider"`
-	Config      map[string]any `json:"config"`
-	Models      modelState     `json:"models"`
-	Credentials []credState    `json:"credentials"`
-	Host        []hostAuthRow  `json:"host_credentials"`
-	HostError   string         `json:"host_error,omitempty"`
-	Hints       []string       `json:"hints"`
+	Plugin      string           `json:"plugin"`
+	Version     string           `json:"version"`
+	Provider    string           `json:"provider"`
+	Config      map[string]any   `json:"config"`
+	Models      modelState       `json:"models"`
+	Credentials []credState      `json:"credentials"`
+	Host        []hostAuthRow    `json:"host_credentials"`
+	HostError   string           `json:"host_error,omitempty"`
+	Usage       []map[string]any `json:"usage,omitempty"`
+	Hints       []string         `json:"hints"`
 }
 
 func handleManagementRegister(req []byte) []byte {
+	// resources 里的 Menu 一律留空：宿主快照对空 Menu 的资源路由直接跳过
+	// （internal/pluginhost/snapshot.go:130-134），面板不会出现 plugin-pages/mimo
+	// 菜单（用户需求②）。/login 资源路由仅供扫码登录页按一次性会话 ID 访问。
 	return okResult(map[string]any{
 		"routes": []map[string]any{
 			{"Method": "GET", "Path": "/plugins/mimo/status",
-				"Description": "MiMo 凭证与模型目录状态（JSON）"},
+				"Description": "MiMo 凭证、用量与模型目录状态（JSON，需要管理密钥）"},
+			{"Method": "POST", "Path": "/plugins/mimo/login/start",
+				"Description": "创建登录会话（需要管理密钥），返回一次性登录页地址（扫码+账号密码）"},
+			{"Method": "POST", "Path": "/plugins/mimo/login/password",
+				"Description": "账号密码登录（需要管理密钥）；body {session?,user,password}，密码不落盘不进日志；小米新设备验证时返回 status=awaiting-otp"},
+			{"Method": "POST", "Path": "/plugins/mimo/login/verify",
+				"Description": "提交小米新设备验证的短信/邮箱验证码（需要管理密钥）；body {session,code}"},
+			{"Method": "POST", "Path": "/plugins/mimo/login/cancel",
+				"Description": "取消登录会话"},
+			{"Method": "GET", "Path": "/plugins/mimo/login/status",
+				"Description": "查询登录会话状态"},
 		},
 		"resources": []map[string]any{
-			{"Path": "/status", "Menu": "MiMo 凭证",
-				"Description": "MiMo SSO 凭证状态、续期记录与模型目录来源"},
+			{"Path": "/login", "Menu": "",
+				"Description": "MiMo 登录页（扫码+账号密码双通道；一次性会话 ID 访问；Menu 留空故不进面板菜单）"},
 		},
 	})
 }
@@ -68,18 +87,54 @@ func handleManagement(req []byte) []byte {
 	_ = json.Unmarshal(req, &in)
 	dbg("management.handle %s %s", in.Method, in.Path)
 
-	payload := collectStatus()
-
-	// 资源页：浏览器打开的 HTML，无管理鉴权 → 只放非敏感信息
+	// ---- 资源路由（无管理鉴权）：登录页 / 会话状态轮询 / 账号密码登录 ----
+	// 只输出非敏感信息；qr/lp/loginUrl 等凭证等价物绝不出现，密码绝不回显。
 	if strings.Contains(in.Path, "/resource/") {
+		id := ""
+		if v := in.Query["session"]; len(v) > 0 {
+			id = strings.TrimSpace(v[0])
+		}
+		// POST：登录页密码表单提交（凭 session ID 访问，与扫码页同一暴露面）
+		if in.Method == http.MethodPost {
+			return wrapResourcePassword(in.Body, id)
+		}
+		s := getQRSession(id)
+		if v := in.Query["poll"]; len(v) > 0 && strings.TrimSpace(v[0]) != "" {
+			if s == nil {
+				return resourceJSON(404, `{"error":"session not found or expired"}`)
+			}
+			st, _ := json.Marshal(map[string]any{
+				"session": s.ID, "status": s.Status, "message": s.Message,
+				"user_id": s.UserID, "auth_file": s.AuthFile,
+			})
+			return resourceJSON(200, string(st))
+		}
 		return okResult(map[string]any{
 			"StatusCode": http.StatusOK,
 			"Headers":    http.Header{"content-type": []string{"text/html; charset=utf-8"}},
-			"Body":       []byte(renderStatusHTML(payload)),
+			"Body":       []byte(renderLoginPage(s, "")),
 		})
 	}
 
-	// 管理 API：需要管理密钥 → 返回完整 JSON
+	// ---- 管理路由（宿主已校验管理密钥）----
+	// ⚠️ 宿主要求 management.handle 的 RPC 结果是 {StatusCode,Headers,Body} 的
+	// HTTP 响应描述；业务 handler 返回的是 {ok,result|error} 信封，必须经
+	// wrapManagementHTTP 转换，否则宿主报 "plugin management handler failed"。
+	switch {
+	case strings.HasSuffix(in.Path, "/login/start") && in.Method == http.MethodPost:
+		return wrapManagementHTTP(handleLoginStart(in.Body))
+	case strings.HasSuffix(in.Path, "/login/password") && in.Method == http.MethodPost:
+		return wrapManagementHTTP(handleLoginPassword(in.Body))
+	case strings.HasSuffix(in.Path, "/login/verify") && in.Method == http.MethodPost:
+		return wrapManagementHTTP(handleLoginVerify(in.Body))
+	case strings.HasSuffix(in.Path, "/login/cancel") && in.Method == http.MethodPost:
+		return wrapManagementHTTP(handleLoginCancel(in.Body))
+	case strings.Contains(in.Path, "/login/status"):
+		return wrapManagementHTTP(handleLoginStatus(in.Query))
+	}
+
+	// 默认：状态 JSON（凭证/用量/模型目录/配置）
+	payload := collectStatus()
 	body, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return okResult(map[string]any{
@@ -90,6 +145,82 @@ func handleManagement(req []byte) []byte {
 	}
 	return okResult(map[string]any{
 		"StatusCode": http.StatusOK,
+		"Headers":    http.Header{"content-type": []string{"application/json"}},
+		"Body":       body,
+	})
+}
+
+func resourceJSON(status int, body string) []byte {
+	return okResult(map[string]any{
+		"StatusCode": status,
+		"Headers":    http.Header{"content-type": []string{"application/json"}},
+		"Body":       []byte(body),
+	})
+}
+
+// wrapResourcePassword 处理登录页密码表单的 POST：
+// body JSON {session,user,password}（session 也可从 query 补），结果转成资源路由
+// 的 HTTP 响应描述。密码只在 handleLoginPassword 内存中流转。
+func wrapResourcePassword(body []byte, querySession string) []byte {
+	var in struct {
+		Session string `json:"session"`
+	}
+	_ = json.Unmarshal(body, &in)
+	if strings.TrimSpace(in.Session) == "" && strings.TrimSpace(querySession) != "" {
+		merged := map[string]any{}
+		_ = json.Unmarshal(body, &merged)
+		merged["session"] = strings.TrimSpace(querySession)
+		if b, err := json.Marshal(merged); err == nil {
+			body = b
+		}
+	}
+	env := handleLoginPassword(body)
+	var e envelope
+	_ = json.Unmarshal(env, &e)
+	status := http.StatusOK
+	payload := []byte(e.Result)
+	if !e.OK {
+		status = http.StatusUnauthorized
+		payload = []byte(`{"error":"login failed"}`)
+		if e.Error != nil {
+			if e.Error.HTTPStatus != 0 {
+				status = e.Error.HTTPStatus
+			}
+			msg, _ := json.Marshal(map[string]any{"error": e.Error.Message, "code": e.Error.Code})
+			payload = msg
+		}
+	}
+	return resourceJSON(status, string(payload))
+}
+
+// wrapManagementHTTP 把业务信封 {ok,result|error} 转成宿主要的
+// HTTP 响应描述 {StatusCode,Headers,Body}。
+//
+// ⚠️ Body 必须是 []byte 类型（json 序列化成 base64 字符串）：宿主的响应结构体
+// 里 Body 是 []byte 字段，如果这里放 json.RawMessage，会序列化成裸 JSON 对象，
+// 宿主 unmarshal 失败 → "plugin management handler failed"。
+func wrapManagementHTTP(env []byte) []byte {
+	var e envelope
+	_ = json.Unmarshal(env, &e)
+	status := http.StatusOK
+	body := []byte(e.Result)
+	if !e.OK {
+		status = http.StatusInternalServerError
+		if e.Error != nil {
+			if e.Error.HTTPStatus != 0 {
+				status = e.Error.HTTPStatus
+			}
+			msg, _ := json.Marshal(map[string]any{"error": e.Error.Message, "code": e.Error.Code})
+			body = msg
+		} else {
+			body = []byte(`{"error":"plugin handler failed"}`)
+		}
+	}
+	if len(body) == 0 {
+		body = []byte("{}")
+	}
+	return okResult(map[string]any{
+		"StatusCode": status,
 		"Headers":    http.Header{"content-type": []string{"application/json"}},
 		"Body":       body,
 	})
@@ -120,6 +251,9 @@ func collectStatus() statusPayload {
 	if hostErr != nil {
 		p.HostError = hostErr.Error()
 	}
+
+	// 剩余使用量快照（GET /api/user/usage，auth.parse/refresh 时采集）
+	p.Usage = usageSnapshotsAll()
 
 	p.Hints = buildHints(p)
 	return p
@@ -301,6 +435,27 @@ footer{color:#999;font-size:12px;margin-top:20px}
 	}
 	b.WriteString(`</div></div>`)
 
+	/* ---- 剩余使用量快照 ---- */
+	if len(p.Usage) > 0 {
+		b.WriteString(`<div class="card"><h2>剩余使用量（GET /api/user/usage 快照）</h2>` +
+			`<table><tr><th>AuthID</th><th>剩余</th><th>重置日期</th><th>采集时间</th><th>备注</th></tr>`)
+		for _, u := range p.Usage {
+			remaining := "—"
+			if v, ok := u["remaining_percent"]; ok {
+				remaining = fmt.Sprintf("%v%%", v)
+			}
+			fmt.Fprintf(&b, `<tr><td><code>%s</code></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>`,
+				html.EscapeString(mapStr(u, "auth_id")),
+				html.EscapeString(remaining),
+				html.EscapeString(mapStr(u, "reset_date")),
+				html.EscapeString(mapStr(u, "observed_at")),
+				html.EscapeString(mapStr(u, "error")))
+		}
+		b.WriteString(`</table><p style="color:#888;font-size:12px;margin:10px 0 0">` +
+			`实时查询：<code>POST /v0/management/quota/fetch {"auth_index":"..."}</code>（需管理密钥）；` +
+			`面板 auth-files 详情 INFO 视图里也能看到 <code>usage_snapshot</code> 字段。</p></div>`)
+	}
+
 	/* ---- 配置 ---- */
 	b.WriteString(`<div class="card"><h2>配置</h2><div class="kv">`)
 	keys := make([]string, 0, len(p.Config))
@@ -326,6 +481,19 @@ func reactiveTotal(cs []credState) int {
 		n += c.Reactive
 	}
 	return n
+}
+
+// mapStr 从 map[string]any 里取字段转字符串，缺失/空值给占位符。
+func mapStr(m map[string]any, key string) string {
+	v, ok := m[key]
+	if !ok || v == nil {
+		return "—"
+	}
+	s := strings.TrimSpace(fmt.Sprintf("%v", v))
+	if s == "" {
+		return "—"
+	}
+	return s
 }
 
 func fmtTime(t time.Time) string {

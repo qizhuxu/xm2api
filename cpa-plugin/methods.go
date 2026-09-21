@@ -31,6 +31,12 @@ const (
 	methodManagementRegister = "management.register"
 	methodManagementHandle   = "management.handle"
 
+	// quota_provider 能力（CPA 内置插件配额接口，管理面 /v0/management/quota/*）
+	methodQuotaIdentifier = "quota.identifier"
+	methodQuotaDescribe   = "quota.describe"
+	methodQuotaFetch      = "quota.fetch"
+	methodQuotaReset      = "quota.reset"
+
 	methodHostHTTPDo          = "host.http.do"
 	methodHostHTTPDoStream    = "host.http.do_stream"
 	methodHostHTTPStreamRead  = "host.http.stream_read"
@@ -38,5 +44,10 @@ const (
 	methodHostStreamEmit      = "host.stream.emit"
 	methodHostStreamClose     = "host.stream.close"
 	methodHostLog             = "host.log"
-	methodHostAuthList        = "host.auth.list"
+	methodHostAuthList = "host.auth.list"
+	// host.auth.get: {"auth_index":"..."} → {auth_index,name,path,json}（凭证 JSON 原文）。
+	methodHostAuthGet = "host.auth.get"
+	// host.auth.save: {name(必须 .json), json(字节,JSON 里为 base64)} → 原样写入
+	// 宿主 auth 目录并热加载。扫码登录拿到凭证后就是用它落盘的。
+	methodHostAuthSave = "host.auth.save"
 )

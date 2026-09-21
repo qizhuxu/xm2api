@@ -18,11 +18,12 @@
 
 | 能力 | 方法 | 说明 |
 |---|---|---|
-| `auth_provider` | `auth.parse` / `auth.refresh` | 解析 `mimo.json`；用 `passToken` 做两阶段 SSO 换 `serviceToken` 并续期 |
-| `model_provider` | `model.static` / `model.for_auth` | 带凭证从上游 `/api/model/list` 拉目录，10 分钟缓存，失败回落兜底清单 |
-| `executor` | `executor.execute` / `execute_stream` / `count_tokens` | 转发到 `/api/route/chat/completions`，流式走 `host.stream.emit` 真流式 |
+| `auth_provider` | `auth.parse` / `auth.refresh` / `auth.login.start` / `auth.login.poll` | 解析 `mimo.json`；用 `passToken` 做两阶段 SSO 换 `serviceToken` 并续期；`login.*` 把官方面板 `#/oauth` OAuth 流程桥到登录页会话 |
+| `model_provider` | `model.static` / `model.for_auth` | 带凭证从上游 `/api/model/list` 拉目录，10 分钟缓存，失败回落兜底清单；图像模型 Type 上报 `openai-image`（过 CPA 图像白名单） |
+| `executor` | `executor.execute` / `execute_stream` / `count_tokens` | chat → `/api/route/chat/completions`（流式走 `host.stream.emit` 真流式）；图像 → `/api/route/images/generations`（`openai-image` 格式直通） |
 | `request_normalizer` | `request.normalize` | 可选的 web search 自动注入（默认关） |
-| `management_api` | `management.register` / `management.handle` | 管理面板里的「MiMo 凭证」状态页，见第 11 节 |
+| `quota_provider` | `quota.identifier` / `describe` / `fetch` / `reset` | 查上游 `/api/user/usage`，向 CPA 管理面暴露 MiMo **剩余使用量**（`remainingFraction` + 重置时间） |
+| `management_api` | `management.register` / `management.handle` | 状态 JSON + 登录接口（扫码/账号密码双通道）+ 面板 `#/oauth` SSO 桥接；**不注册面板菜单**（Menu 留空），见第 11/12 节 |
 
 `auth_provider` 不是可选项 —— **CPA 的硬性要求是插件执行器必须有一条同 provider key 的 auth 记录**（配置注释原文：`Plugin executors require a matching auth record with the same provider key.`）。
 
@@ -40,6 +41,12 @@ go build -buildmode=c-shared -trimpath -ldflags "-s -w" -o dist/mimo.dll .
 
 > 国内网络如果卡在 `proxy.golang.org`，加 `$env:GOPROXY = "https://goproxy.cn,direct"`。
 > 有 `make` 的话：`make build` / `make test` / `make package`。
+>
+> ⚠️ **`-trimpath -ldflags "-s -w"` 不是可选项**：实测不带 strip 构建出的 c-shared DLL
+> （体积约翻倍，~13MB）会被 CPA 的 shadow-copy 加载直接拒绝
+> （`pluginhost: failed to load plugin ... %1 is not a valid Win32 application`）。
+> 构建命令必须与上面完全一致（strip 后 ~7MB）。CPA 不热重载插件动态库：替换 DLL 后
+> 需要重启 CLIProxyAPI 进程。
 
 ### 2.2 部署
 
@@ -97,9 +104,15 @@ api-keys:
 { "type": "mimo", "cookie": "serviceToken=...; userId=..." }
 ```
 
-`pass_token` / `user_id` / `c_user_id` 可以用 xm2api 仓库里的 `node creds.mjs` 导出，见 `examples/mimo.json`。
+`pass_token` / `user_id` / `c_user_id` 的获取（三条路，详见第 12 节）：
 
-> `pass_token` 等同账号密码，别提交到仓库。
+1. **导出脚本（推荐）**：在已登录 MiMo Desktop 的 Win 本机跑 xm2api 仓库的 `npm run cpa-auth`（脚本 `cpa-auth.mjs`），直接产出插件格式的 `mimo.json`（顺手做一次 SSO 校验并附带 `service_token`），scp 到 Linux 服务器的 `auth/` 目录即热生效。
+2. **官方面板 SSO 登录**：`management.html#/oauth` 里 mimo 的「SSO 登录」按钮 → 打开一次性登录页（扫码 / 账号密码双通道）→ 宿主持久化 AuthData。
+3. **curl 登录接口**：带管理密钥 `POST .../plugins/mimo/login/start`（登录页）或 `.../plugins/mimo/login/password`（纯密码，脚本化），插件自动换取并写入 `auth/` 目录。
+
+样例见 `examples/mimo.json`。
+
+> `pass_token` 等同账号密码，别提交到仓库；传输只走 scp/sftp。
 
 ### 2.5 凭证是怎么被处理的
 
@@ -372,7 +385,7 @@ pwsh -File package.ps1 -Version 0.1.0
 {
   "id": "mimo",
   "name": "Xiaomi MiMo",
-  "description": "Xiaomi MiMo Desktop SSO provider: chat, TTS, ASR and web search.",
+  "description": "Xiaomi MiMo Desktop SSO provider: chat, TTS, ASR, image generation, web search and quota.",
   "author": "<你的 GitHub 用户名>",
   "repository": "https://github.com/<你>/<仓库>",
   "license": "MIT",
@@ -393,73 +406,198 @@ CPA v7.3.9 + 真实 MiMo 账号，全部经本插件执行器转发。
 | `mimo-v2.5-tts-voicedesign` | ✅ | 同上，用 **user** 角色的 `instructions` 描述音色 |
 | `mimo-v2.5-tts-voiceclone` | ✅ | 同上，`audio.voice` 传参考音频的 data URL |
 | `mimo-v2.5-asr` | ✅ | `messages[].content` 放 `{"type":"input_audio"}`；转写文本在 `message.content`。闭环实测：TTS 合成「这是一段语音合成测试。」→ ASR 原样转回 |
-| `Doubao-Seedream-5.0-pro`（图像） | ❌ | **插件服务不了**，见下 |
+| `Doubao-Seedream-5.0-pro`（图像） | ✅ | `POST /v1/images/generations` 直接可用（2026-09-21 实测：返回火山引擎 TOS 图像 URL），机制见下 |
+| 剩余使用量 | ✅ | `POST /v0/management/quota/fetch {"auth_index":"..."}` → `remainingFraction: 0.833`、重置时间；`percent` 语义实测为**剩余**百分比 |
 
 TTS/ASR 能通是因为它们本来就打 `chat/completions`（`/v1/audio/*` 在上游没配供应商，会 401）。所以执行器不需要任何特判 —— 连 `usage.prompt_tokens_details.audio_tokens`、`usage.seconds`、`message.audio.transcript` 这些 MiMo 扩展都原样穿过。
 
-### 图像生成为什么不行
+### 图像生成的实现机制（源码级，v7.3.9 实测）
 
-`POST /v1/images/generations` 会被 CPA 在**进入插件之前**拒掉：
+CPA 的 `/v1/images/*` 有一份模型白名单，判据只有一个：全局 registry 里
+`LookupModelInfo(model).Type == "openai-image"`（`openai_images_handlers.go:257-258`），
+而宿主会把插件上报的 `ModelInfo.Type` **原样**写进 registry（`internal/pluginhost/adapters.go:126`），
+不区分来源。于是插件侧三步走通：
 
-```
-400 Model Doubao-Seedream-5.0-pro is not supported on /v1/images/generations
-    or /v1/images/edits. Use gpt-image-1.5, ..., or a configured
-    openai-compatibility image model.
-```
+1. `model_provider` 把 `IMAGE_GENERATION` 模型的 `Type` 上报为 **`"openai-image"`**（models.go）；
+2. manifest 的 `executor_input_formats` / `executor_output_formats` 加入 **`"openai-image"`**
+   （未注册的格式串会被原样保留，declared 包含 requested 时请求 payload 直通插件）；
+3. executor 识别图像请求（格式串或模型名含 image/seedream），POST 上游
+   **`/api/route/images/generations`**（注意：没有 `/v1` 段，与 chat 同构），401 时同样反应式续期重试。
 
-CPA 在这个接口上有一份**硬编码模型白名单**（`gpt-image-*` / `grok-imagine-*`），自定义模型唯一的扩展路径就是 `openai-compatibility` —— 插件执行器压根没有图像路由（`executor_input_formats` 只认 `chat-completions` / `responses` / `anthropic`）。
-
-**两个选择：**
-
-1. **不要图像** —— 用 `exclude_models: ["Doubao-*"]` 把它从列表里藏掉，免得误导：
-
-   ```yaml
-   plugins:
-     configs:
-       mimo:
-         exclude_models: ["Doubao-*"]
-   ```
-
-2. **混合部署** —— 插件跑文本/语音（不需要 Node 进程），另外让 xm2api 常驻专门供图像。注意 provider 名要**不一样**，否则会触发「同 provider 时 openai-compatibility 优先」把插件顶掉：
-
-   ```yaml
-   openai-compatibility:
-     - name: "mimo-image"                      # ← 不能叫 mimo
-       base-url: "http://127.0.0.1:18787/v1"   # xm2api 的 Node 反代
-       api-key-entries:
-         - api-key: "xm2api-local"
-       models:
-         - name: "Doubao-Seedream-5.0-pro"
-           alias: "Doubao-Seedream-5.0-pro"
-           image: true                          # ← 这个标记才能进图像白名单
-   ```
+注意：`openai-image` 是 CPA 未文档化的内部格式串（官方插件文档零图像条目，v7.3.10 changelog 也无相关变更），
+CPA 升级后需重验。不想用图像时依旧可用 `exclude_models: ["Doubao-*"]` 把模型藏掉。
 
 ## 10. 其它已知局限
 
 - `executor.count_tokens` 是按字节数 / 4 的**粗略估算**，上游没有暴露 tokenizer。
 - 插件与 CPA 同进程，是受信任代码。别加载来路不明的动态库。
 - `model.static`（无凭证时）拿不到上游目录，只能吃缓存或两个文本模型的兜底清单；带凭证的 `model.for_auth` 才是完整目录。
+- **推理等级 `reasoning_effort` 上游不支持**：实测 `low/medium/high` 无档位差异、`none` 关不掉思考、非法值照样 HTTP 200（链路无人校验）。插件对请求体逐字段透传，参数会原样送到上游，但上游忽略——客户端不显示推理等级选择器是正常的，思考内容（`reasoning_content`）不受影响。
+- **图像格式串 `openai-image` 是 CPA 未文档化的行为**（源码成立、v7.3.9/v7.3.10 实测可用，但官方插件文档没有图像条目）；CPA 大版本升级后需重验图像链路。
+- **官方面板的额度卡片看不到 mimo**：Management Center SPA 硬编码只给 7 家内置 provider 渲染额度 UI
+  （`VM=[claude,antigravity,codex,xai,kimi,devin,meta]` + store `M` 同构，`#/quota` 页排序回调
+  `M[e.type][file]` 对 `type=mimo` 抛 TypeError；前端 bundle 不消费插件 `quota_provider`，实测）。
+  **已解决，两个层面**：
+  1. **auth-files 页（无需补丁）**：用量写进 auth 文件 `label` 字段——插件每次拿到用量
+     （parse/refresh/quota.fetch）都经宿主 `host.auth.list/get/save` 回调把
+     `mimo (用户) · 剩余 80% · 2026-09-23 重置` 写进文件并刷新宿主内存记录，
+     **面板 auth-files 列表每行直接可见**（实测生效）；详情 INFO 视图另有
+     `usage_snapshot` 全量快照。CPA 重启后插件从文件快照自愈（`restoreUsageFromRaw`）。
+  2. **#/quota 页 + auth-files 卡片（面板补丁 v5）**：
+     `cpa-plugin/panel-patch/mimo-quota-patch.html` 注入 `static/management.html` 的
+     **`<head>` 之后**（hook 必须先于面板 bundle 执行）。用 Playwright 实测面板真实 DOM 后，
+     把卡片放到与内置 provider 一致的两处位置：
+     - `#/quota`：卡片进入 provider 卡片网格 `QuotaPage-module__grid___veEj-`，与 antigravity
+       卡片并列（`placeCard()` 幂等校正父节点 + MutationObserver + 2s 兜底轮询，React 渲染完成后
+       自动归位；`lastHtml` 缓存保证卡片被 React 重建后不会变成空卡）；
+     - `#/auth-files`：给 mimo 卡片在 `footer.actions` 之前注入与 antigravity 同结构的
+       `AuthFileQuota-module__quotaSection`（class 名**动态取自面板当前真实节点**，面板升级换
+       hash 后缀也不失效），点击「刷新额度」就地渲染剩余量（实测 `剩余 78.0% · MiMo 用量周期 ·
+       至 2026-09-23 · 重置 ...`）。
+     数据：`GET /v0/management/plugins/mimo/quota?auth_index=`（插件 quota_provider 标准端点，
+     normalized `{subscription,summary,groups}`，实测返回 78.2%），失败回退
+     `POST /v0/management/quota/fetch`。
+     **密钥零配置**：patch 在 `<head>` 安装 fetch/XHR hook，捕获面板自身请求的
+     `Authorization: Bearer <key>`（实测捕获成功），不再依赖登录时勾选「记住密码」或控制台注入。
+     **前置**：config `remote-management.disable-auto-update-panel: true`
+     （否则 updater 按 GitHub digest 覆写本地面板，实测源码
+     `managementasset/updater.go:117,280`）。
+     补丁应用步骤见该文件头注释（Linux/Windows 通用，插入后硬刷新面板即可，无需重启 CPA）。
+  其余实时位置：`POST /v0/management/quota/fetch`（curl/脚本）与
+  `GET /v0/management/plugins/mimo/status`（状态 JSON `usage` 字段）。
 
-## 11. 管理面板
+## 11. 管理面：状态、用量、登录
 
-插件声明了 `management_api`，在 CPA 管理面板里加了一个「**MiMo 凭证**」入口。
-
-**两类入口，鉴权边界完全不同**（官方文档明确区分，别搞反）：
+插件声明了 `management_api`，但**不在官方面板注册任何菜单**（`management.register` 的
+`resources[].Menu` 一律留空 —— 宿主对空 Menu 的资源路由不生成面板菜单，
+`internal/pluginhost/snapshot.go:130-134`）。入口全部是 URL/CLI/官方面板的 OAuth 页：
 
 | 入口 | 路径 | 鉴权 | 内容 |
 |---|---|---|---|
-| 资源页 | `GET /v0/resource/plugins/mimo/status` | **不走管理鉴权** | 服务端渲染的 HTML，纯展示，无任何 token |
-| 管理 API | `GET /v0/management/plugins/mimo/status` | 需要管理密钥 | 同样的数据，JSON |
+| 状态 JSON | `GET /v0/management/plugins/mimo/status` | 需要管理密钥 | 凭证/用量/模型目录/配置，诊断建议置顶 |
+| 创建登录会话 | `POST /v0/management/plugins/mimo/login/start` | 需要管理密钥 | 创建一次性会话，返回登录页 URL（扫码+账号密码双通道） |
+| 账号密码登录 | `POST /v0/management/plugins/mimo/login/password` | 需要管理密钥 | body `{session?,user,password}`；密码只在内存流转，不落盘不进日志 |
+| 登录页 | `GET /v0/resource/plugins/mimo/login?session=<id>` | 无鉴权，但会话 ID 128bit 随机 + 5 分钟过期 | 扫码 + 账号密码双通道页；**不出现在面板菜单** |
+| 用量查询 | `POST /v0/management/quota/fetch {"auth_index":"..."}` | 需要管理密钥 | 规范化配额（`remainingFraction`/重置时间），实测实时 |
+| 面板 OAuth 页 | `management.html#/oauth` → mimo「SSO 登录」 | 面板登录态 | 官方面板标准插件 OAuth 流程，见下 |
 
-页面是自包含 HTML，不加载任何外部脚本或资源；**不含任何 token**（只显示长度），可以放心截图。
+管理密钥通过请求头传递：`X-Management-Key: <key>` 或 `Authorization: Bearer <key>`。
 
-能看到的东西：
+**官方面板 `#/oauth` 的 SSO 登录（auth.login.start / auth.login.poll 桥接）**：宿主对
+插件 provider 有标准 OAuth 契约 —— 面板 `GET /v0/management/mimo-auth-url` → 宿主调
+插件 `auth.login.start` RPC，插件返回 `{Provider,URL,State}`；面板轮询
+`/v0/management/get-auth-status?state=<State>` → `auth.login.poll` RPC 返回
+`pending/success/error`，success 时宿主持久化 AuthData（`savePluginLoginRecords`）。
+插件把这套契约桥到登录页会话上：`State` = 会话 ID（crypto/rand hex，天然满足宿主
+`ValidateOAuthState` 的 `[A-Za-z0-9._-]` 字符集），`URL` = 同源相对路径登录页。
+实测（v7.3.9）：`mimo-auth-url` 返回 200 + 非空 state，`get-auth-status` 返回 `wait`，
+登录页 200（二维码 + 密码表单）。旧版插件在这里返回空 state，宿主 502
+`invalid oauth state` —— 这就是「面板 SSO 登录不能用」的根因。
 
-- **诊断建议**（放在最前面，这才是打开页面的原因）：凭证能不能自动续期、最近为什么失败、模型目录为什么是兜底清单 —— 每条都翻译成「你该怎么办」
-- **凭证（插件视角）**：AuthID、是否可续期、token 有没有/多长、最近换取时间、续期成功/失败次数、这次 token 是**怎么来的**（auth 文件 / 定时续期 / 反应式续期）
-- **凭证（宿主视角）**：`host.auth.list` 的只读视图 —— 宿主认为的 status、是否 disabled/unavailable
-- **模型目录**：来源（upstream / cache / disk / fallback）、数量、更新时间、最近错误
-- **生效配置**
+状态 JSON / 登录页 / 会话状态**都不含任何 token**（token 只显示长度；qr/lp/loginUrl
+这类凭证等价物也绝不进日志与状态输出，单测 `TestLoginStatusNeverLeaksQR` 把这一点钉死）。
 
-最有用的两个字段是「**来源**」和「**续期次数**」：前者一眼看出 token 是刚换的还是文件里那份；后者里的 reactive 计数直接告诉你「这个 token 已经被上游拒过几次」。
+状态页能看到：诊断建议（凭证能不能续期、最近为什么失败、目录为什么降级）、
+凭证双视角（插件/宿主）、**剩余使用量快照**、模型目录来源、生效配置。
+最有用的字段是「来源」和「reactive 续期次数」。
+
+**面板 auth-files 详情怎么看到剩余用量**：插件在 `auth.parse`/`auth.refresh`/登录时
+会顺手查一次 `GET /api/user/usage`，快照写进 AuthData 的 `Metadata.usage_snapshot`。
+宿主的 auth-files download API 与详情 INFO 视图按 `StorageJSON ∪ Metadata` 合并展示，
+所以**详情里直接可见**（实测：`remaining_percent: 82.2` 等字段在
+`/v0/management/auth-files/download?name=mimo.json` 返回体中）：
+
+```json
+"usage_snapshot": {
+  "observed_at": "2026-09-21T17:13:09+08:00",
+  "remaining_percent": 82.2,
+  "reset_date": "2026-09-23",
+  "source": "GET /api/user/usage"
+}
+```
+
+（快照在 parse/refresh/登录时更新；实时值用 `quota/fetch` 查。官方面板的独立额度
+卡片暂不渲染插件配额，见第 10 节。）
+
+## 12. Linux 部署：凭证获取
+
+CPA + `mimo.so` 部署到 Linux 后没有 MiMo 客户端、没有 Chromium Cookie 库，
+凭证获取有两条路（详细逆向报告见仓库 `investigation-mimo-auth-report.md`）。
+
+### 方案一：Win 本机导出 + 手动上传（已闭环，推荐）
+
+```powershell
+# Win 本机（已登录 MiMo Desktop）
+npm run cpa-auth        # xm2api 仓库；产出 data/mimo.json（含 pass_token + SSO 校验过的 service_token）
+scp data/mimo.json user@server:/path/to/cli-proxy-api/auth/mimo.json
+```
+
+CPA 监听 auth 目录，**落文件即热加载**（日志实测：`auth file changed → processing
+incrementally` → 模型目录「来源 upstream」）。验证：
+
+```bash
+curl -H "X-Management-Key: <管理密钥>" http://server:port/v0/management/plugins/mimo/status
+```
+
+MiMo 客户端重新登录会轮换 `pass_token`（客户端自身也有 7 天 MAX_AGE），届时重跑脚本上传。
+
+### 方案二：服务器侧登录 —— 扫码 或 账号密码（免手动，插件内置）
+
+逆向结论：**自定义回调这条路不通** —— 小米 passport 的 callback 按 sid 白名单校验
+（自定义地址实测 `code=10025「Callback连接不合法」`），且 `passToken` 只落在
+`.account.xiaomi.com` 域的 HttpOnly cookie 里，远程回调拿不到任何凭证。
+
+插件内置两条服务器侧通道，**入口有两个**（殊途同归，同一登录页）：
+官方面板 `management.html#/oauth` 里 mimo 的「SSO 登录」按钮，或 curl `login/start`。
+
+**通道 A：扫码** —— 小米扫码登录把凭证发给长轮询方：
+`GET account.xiaomi.com/longPolling/loginUrl?sid=mimopc` 可匿名创建 QR 会话（实测
+`code:0`），手机扫码确认后长轮询响应体里直接带 `{userId,cUserId,passToken}` ——
+谁发起轮询凭证就发给谁。
+
+**通道 B：账号密码** —— 复刻小米 web 登录（实测端点存活，sid=mimopc 接受该形态）：
+
+```
+GET  /pass/serviceLogin?sid=mimopc&_json=true   → {qs, _sign, callback}
+POST /pass/serviceLoginAuth2                     → code=0 + location
+     form: sid/callback/qs/user/hash/_json/_locale/_sign
+     hash = uppercase(md5(password))
+GET  <location>（不跟随重定向）                  → Set-Cookie passToken/userId/cUserId
+```
+
+风控如实处理、不做绕过：响应含 `notificationUrl`/`secondValidation`（新设备短信/设备
+确认）或 `captchaUrl`（图形验证码）时，插件返回明确错误提示改走扫码或方案一。
+**密码只在内存中流经插件进程**：不落盘、不写日志、响应与页面均不回显。
+
+```bash
+# 1) 服务器上创建会话（管理密钥）—— 面板 SSO 登录按钮等价于这一步
+curl -X POST -H "X-Management-Key: <key>" \
+  http://server:port/v0/management/plugins/mimo/login/start
+# → {"session":"<id>","login_page":"/v0/resource/plugins/mimo/login?session=<id>",...}
+
+# 2) 浏览器打开 login_page（任何能访问服务器的设备）：
+#    扫码通道：用小米手机（设置 → 小米账号）扫码确认
+#    密码通道：页面切到「账号密码登录」，填小米账号+密码提交
+# 3) 插件自动：passToken → SSO 换 serviceToken → 写 auth/mimo.json → 宿主热加载
+# 4) 轮询会话状态：
+curl -H "X-Management-Key: <key>" \
+  "http://server:port/v0/management/plugins/mimo/login/status?session=<id>"
+
+# 也可以不经登录页，curl 直接走密码通道（自动化/脚本）：
+curl -X POST -H "X-Management-Key: <key>" -H "Content-Type: application/json" \
+  -d '{"user":"<小米账号>","password":"<密码>"}' \
+  http://server:port/v0/management/plugins/mimo/login/password
+```
+
+走官方面板时还有第三条等价路径：面板 OAuth 流程的 `auth.login.poll` 返回 success 后，
+**宿主自己**把 AuthData（含 `usage_snapshot` Metadata）存进 auth 目录，插件的
+`host.auth.save` 与它是双通道幂等落盘。
+
+安全设计：会话 ID 128bit 随机、5 分钟过期即焚；二维码/轮询 URL 是凭证等价物，
+不进日志不进状态页；登录页注册为无菜单资源路由，不会在面板里冒出插件页面。
+风控/二次验证触发时如实报错并提示回退方案一。
+
+> 生产部署建议：管理面与登录页只在内网/反代后面暴露；`allow-remote: false`。
+> 密码通道的暴露面与扫码页一致（凭一次性会话 ID 访问），但若 CPA 面板对公网开放，
+> 建议只用扫码通道或方案一，避免账号密码经过公网链路。
 

@@ -74,6 +74,15 @@ func toModelInfo(m upstreamModel) modelInfo {
 	}
 	switch typ {
 	case "IMAGE_GENERATION":
+		// ⚠️ Type 必须上报 "openai-image"：CPA 的 /v1/images/generations 白名单
+		// 只认 registry.LookupModelInfo(model).Type == "openai-image"
+		// （sdk/api/handlers/openai/openai_images_handlers.go:257-258），而宿主把
+		// 插件上报的 ModelInfo.Type 原样写进全局 registry，不区分来源
+		// （internal/pluginhost/adapters.go:126）。上报 "IMAGE_GENERATION" 会被
+		// 白名单当场拒掉（实测：400 Model ... is not supported on /v1/images/...）。
+		// executor_input_formats 同时声明 "openai-image" 后，图像请求 payload
+		// 原样直通插件，由 executor 打上游 /api/route/v1/images/generations。
+		info.Type = "openai-image"
 		info.SupportedGenerationMethods = []string{"image"}
 		info.SupportedInputModalities = []string{"text"}
 		info.SupportedOutputModalities = []string{"image"}
@@ -249,6 +258,13 @@ func loadModelsFromDisk() []modelInfo {
 	var list []modelInfo
 	if err := json.Unmarshal(raw, &list); err != nil {
 		return nil
+	}
+	// 磁盘缓存兼容：旧版本把图像模型 Type 写成 "IMAGE_GENERATION"，会被 CPA 的
+	// /v1/images/generations 白名单拒掉。升级 DLL 后旧缓存仍在盘上，加载时就地纠正。
+	for i := range list {
+		if strings.EqualFold(list[i].Type, "IMAGE_GENERATION") {
+			list[i].Type = "openai-image"
+		}
 	}
 	return list
 }

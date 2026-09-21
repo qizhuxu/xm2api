@@ -279,17 +279,10 @@ func dispatch(method string, req []byte) []byte {
 	case methodAuthRefresh:
 		return handleAuthRefresh(req)
 	case methodAuthLoginStart:
-		// 本插件没有交互式登录：凭证来自客户端已登录的 cookie 库。
-		return okResult(map[string]any{
-			"Provider": providerKey,
-			"URL":      "",
-			"State":    "",
-			"Metadata": map[string]any{
-				"hint": "把 mimo.json 放进 CPA 的 auth 目录；可用 `node creds.mjs` 导出。",
-			},
-		})
+		// 面板 #/oauth「SSO 登录」入口：返回一次性登录页（扫码 + 账号密码双通道）
+		return handleAuthLoginStartRPC(req)
 	case methodAuthLoginPoll:
-		return okResult(map[string]any{"Status": "error", "Message": "MiMo 插件不支持交互式登录，请直接放置 mimo.json"})
+		return handleAuthLoginPollRPC(req)
 
 	case methodModelStatic, methodModelForAuth:
 		return handleModels(method, req)
@@ -303,6 +296,15 @@ func dispatch(method string, req []byte) []byte {
 
 	case methodRequestNormalize:
 		return handleNormalize(req)
+
+	case methodQuotaIdentifier:
+		return identifierResult()
+	case methodQuotaDescribe:
+		return handleQuotaDescribe(req)
+	case methodQuotaFetch:
+		return handleQuotaFetch(req)
+	case methodQuotaReset:
+		return handleQuotaReset(req)
 
 	case methodManagementRegister:
 		return handleManagementRegister(req)
@@ -339,18 +341,22 @@ func handleRegister(req []byte) []byte {
 				{"Name": "web_search_auto", "Type": "boolean", "Description": "请求未自带 tools 时自动追加 {\"type\":\"web_search\"}（等价于 CPA 的 payload 规则，二选一）"},
 				{"Name": "refresh_after", "Type": "string", "Description": "多久主动换一次 serviceToken，默认 6h"},
 				{"Name": "model_ttl", "Type": "string", "Description": "模型清单缓存时长，默认 10m"},
-				{"Name": "exclude_models", "Type": "array", "Description": "要从模型列表里隐藏的模型名，支持 * 通配。例如 [\"Doubao-*\"]（图像模型无法经插件服务，见 README）"},
+				{"Name": "exclude_models", "Type": "array", "Description": "要从模型列表里隐藏的模型名，支持 * 通配。例如 [\"Doubao-*\"]。图像模型（Doubao-Seedream-5.0-pro）现已可经插件服务 /v1/images/generations，是否隐藏取决于客户端需求"},
 			},
 		},
 		"capabilities": map[string]any{
-			"auth_provider":           true,
+			"auth_provider": true,
 			"model_provider":          true,
 			"executor":                true,
 			"executor_model_scope":    "both",
-			"executor_input_formats":  []string{"chat-completions"},
-			"executor_output_formats": []string{"chat-completions"},
+			// "openai-image" 是 CPA 内部图像执行的格式串：declared 包含它，
+			// /v1/images/* 的请求 payload 才会直通插件 executor（见 README §图像生成）。
+			"executor_input_formats":  []string{"chat-completions", "openai-image"},
+			"executor_output_formats": []string{"chat-completions", "openai-image"},
 			"request_normalizer":      true,
 			"management_api":          true,
+			// quota_provider：管理面 /v0/management/quota/* 由此点亮（剩余使用量）
+			"quota_provider": true,
 		},
 	}
 	return okResult(resp)

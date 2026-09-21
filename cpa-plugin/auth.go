@@ -30,11 +30,13 @@ import (
  */
 
 const (
-	phase1URL   = "https://account.xiaomi.com/pass/serviceLogin"
 	ssoUA       = "MiClaw/1.0"
 	ssoTimeout  = 20 * time.Second
 	maxAuthFile = 1 << 20
 )
+
+// 小米 passport 端点。做成变量而不是常量，单测可以指向 httptest 替身。
+var phase1URL = "https://account.xiaomi.com/pass/serviceLogin"
 
 type mimoCred struct {
 	Type         string `json:"type,omitempty"`
@@ -255,9 +257,15 @@ func authData(c mimoCred, fileName, id string, next time.Time) map[string]any {
 	if fileName == "" {
 		fileName = providerKey + ".json"
 	}
-	label := providerKey
-	if c.UserID != "" {
-		label = providerKey + " (" + c.UserID + ")"
+	// label 带上剩余用量：宿主 auth-files 列表与面板列表页直接渲染 label，
+	// 这是官方面板上插件 provider 唯一「不用点开详情」就能看到用量的位置。
+	label := usageLabelFromSnap(providerKey, c.UserID, usageSnapshotFor(id))
+	md := map[string]any{"type": providerKey}
+	// 用量快照写进 Metadata → mergedStorageJSON 会把它落进 auth 文件 JSON，
+	// 面板 auth-files 详情 INFO 视图直接可见（不含任何 token）。
+	// ⚠️ 只放在这里才不会被下次 auth.refresh 落盘时抹掉（宿主保存 = StorageJSON ∪ Metadata）。
+	if snap := usageSnapshotFor(id); snap != nil {
+		md["usage_snapshot"] = snap
 	}
 	return map[string]any{
 		"Provider":         providerKey,
@@ -266,7 +274,7 @@ func authData(c mimoCred, fileName, id string, next time.Time) map[string]any {
 		"Label":            label,
 		"Disabled":         false,
 		"StorageJSON":      storage,
-		"Metadata":         map[string]any{"type": providerKey},
+		"Metadata":         md,
 		"Attributes":       map[string]string{"provider": providerKey},
 		"NextRefreshAfter": next.UTC().Format(time.RFC3339),
 	}
@@ -315,6 +323,13 @@ func handleAuthParse(req []byte) []byte {
 
 	authID := deriveAuthID(c)
 	noteParsed(authID, c.UserID, c.ServiceToken, c.PassToken != "", "auth.parse")
+	rememberCred(authID, c)
+	// 先从文件里的 usage_snapshot 恢复内存用量（CPA 重启后 label 自愈），
+	// 再异步取新鲜快照覆盖。顺序不能反，否则离线时文件快照会被空记录顶掉。
+	restoreUsageFromRaw(authID, in.RawJSON)
+	// 顺手取用量快照（失败不影响凭证加载）；放在 AuthData 组装之前，
+	// 这样快照随本次 AuthData 一起进 auth 文件。
+	tryAttachUsage(authID, c)
 	dbg("auth.parse id=%s user=%s token=%dB canRenew=%v", authID, c.UserID, len(c.ServiceToken), c.PassToken != "")
 
 	return okResult(map[string]any{
@@ -339,6 +354,9 @@ func handleAuthRefresh(req []byte) []byte {
 		return errResult("invalid_credential", "凭证内容无法解析: "+err.Error(), 400)
 	}
 	c.normalize()
+	// 宿主 refresh 请求的 Metadata 里可能带着上次落盘的 usage_snapshot，
+	// 先恢复内存用量（label/详情在重启后依然有数据），再由 tryAttachUsage 覆盖。
+	restoreUsageFromRaw(deriveAuthID(c), in.Metadata)
 
 	next := time.Now().Add(refreshAfter())
 
@@ -363,6 +381,8 @@ func handleAuthRefresh(req []byte) []byte {
 		hostLog("info", "MiMo serviceToken 已续期")
 		dbg("auth.refresh 成功 id=%s token=%dB", in.AuthID, len(c.ServiceToken))
 		noteParsed(deriveAuthID(c), c.UserID, c.ServiceToken, true, "定时续期")
+		rememberCred(deriveAuthID(c), c)
+		tryAttachUsage(deriveAuthID(c), c) // 续期成功后刷新用量快照，随 AuthData 落盘
 	case c.ServiceToken != "":
 		// 只有短凭证，没法续期；给个长周期避免宿主空转
 		hostLog("debug", "凭证里没有 pass_token，跳过续期")

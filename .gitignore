@@ -17,3 +17,4 @@ cpa-plugin/dist/
 cpa-plugin/*.so
 cpa-plugin/*.dll
 cpa-plugin/*.dylib
+cpa-plugin/*.exe

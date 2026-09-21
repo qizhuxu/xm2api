@@ -93,29 +93,39 @@ func sendUpstream(ctx context.Context, in execRequest, c mimoCred) (*http.Respon
 	res.Body.Close()
 
 	dbg("上游 401，触发反应式续期 (authID=%s)", in.AuthID)
-	sid := c.SID
-	if sid == "" {
-		sid = config().SID
+	if err := renewServiceToken(in.AuthID, &c); err != nil {
+		return nil, err
 	}
-	sso, exErr := exchangeServiceToken(sid, c)
-	if exErr != nil {
-		noteReactive(in.AuthID, "", exErr)
-		hostLog("warn", "MiMo serviceToken 被拒且续期失败: "+exErr.Error())
-		return nil, fmt.Errorf("%w: %v", errRenewFailed, exErr)
-	}
-
-	c.ServiceToken = sso.ServiceToken
-	noteReactive(in.AuthID, sso.ServiceToken, nil)
-	// 凭证换新了，模型目录缓存要作废：启动时若凭证是坏的，目录会落到兜底清单，
-	// 不清缓存的话接下来 10 分钟都只有 2 个模型。
-	invalidateModels()
-	hostLog("info", "MiMo serviceToken 被上游拒绝，已自动续期并重试")
 
 	req2, err := buildUpstream(ctx, in, c)
 	if err != nil {
 		return nil, err
 	}
 	return client.Do(req2)
+}
+
+// renewServiceToken 用 pass_token 重换 serviceToken 并同步插件全部状态。
+// chat 与图像路径共用 —— 续期逻辑只允许有一份，两条路径行为分叉迟早出鬼。
+func renewServiceToken(authID string, c *mimoCred) error {
+	sid := c.SID
+	if sid == "" {
+		sid = config().SID
+	}
+	sso, exErr := exchangeServiceToken(sid, *c)
+	if exErr != nil {
+		noteReactive(authID, "", exErr)
+		hostLog("warn", "MiMo serviceToken 被拒且续期失败: "+exErr.Error())
+		return fmt.Errorf("%w: %v", errRenewFailed, exErr)
+	}
+	c.ServiceToken = sso.ServiceToken
+	c.SID = sso.SID
+	noteReactive(authID, sso.ServiceToken, nil)
+	rememberCred(authID, *c)
+	// 凭证换新了，模型目录缓存要作废：启动时若凭证是坏的，目录会落到兜底清单，
+	// 不清缓存的话接下来 10 分钟都只有 2 个模型。
+	invalidateModels()
+	hostLog("info", "MiMo serviceToken 被上游拒绝，已自动续期并重试")
+	return nil
 }
 
 // upstreamFailure 把 sendUpstream 的错误翻译成带正确 http_status 的信封。
@@ -210,6 +220,13 @@ func handleExecute(req []byte) []byte {
 
 	ctx, cancel := context.WithTimeout(context.Background(), upstreamTimeout)
 	defer cancel()
+
+	// 图像请求：走专用分支打上游 /api/route/v1/images/generations。
+	// 进这里的前提：模型目录把图像模型 Type 上报为 "openai-image"（过 CPA 白名单），
+	// 且 manifest 的 executor_input_formats 声明了 "openai-image"（payload 直通）。
+	if isImageExec(in) {
+		return handleExecuteImage(ctx, in, c)
+	}
 
 	dbg("execute -> POST %s", config().BaseURL+"/api/route/chat/completions")
 	res, err := sendUpstream(ctx, in, c)
@@ -390,6 +407,84 @@ func toPayload(line []byte) []byte {
 	out := make([]byte, len(t))
 	copy(out, t)
 	return out
+}
+
+/* ---------------------------------------------------------------- 图像 */
+
+// imageModelName 模型名判据：只匹配图像特征，TTS/ASR 不会误伤。
+var imageModelName = regexp.MustCompile(`(?i)seedream|image`)
+
+// isImageExec 判断一次 executor 调用是不是图像生成。
+// 双判据：宿主下发的格式串（Format/SourceFormat 含 "image"）优先；
+// 宿主没带格式串时退回模型名特征，带了 chat 字段则以 chat 优先。
+func isImageExec(in execRequest) bool {
+	f := strings.ToLower(strings.TrimSpace(in.Format + " " + in.SourceFormat))
+	if strings.Contains(f, "image") {
+		return true
+	}
+	if strings.Contains(f, "chat") {
+		return false
+	}
+	return imageModelName.MatchString(in.Model)
+}
+
+// handleExecuteImage 把图像请求打到 MiMo 的 /api/route/images/generations。
+// 路径与 xm2api server.mjs 的改写规则一致：上游镜像的是 OpenAI images 接口，
+// 但挂在 /api/route/images/*（没有 /v1 段；chat 同理是 /api/route/chat/completions）。
+// 401 → 反应式续期 → 重试一次，与 chat 路径同一套凭证策略。
+// 上游响应（OpenAI 风格 {created,data:[...]}）原样回传，由 CPA 的图像 handler 解析。
+func handleExecuteImage(ctx context.Context, in execRequest, c mimoCred) []byte {
+	endpoint := config().BaseURL + "/api/route/images/generations"
+	do := func(c mimoCred) (*http.Response, error) {
+		body := in.body()
+		if len(body) == 0 {
+			body = []byte("{}")
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("content-type", "application/json")
+		req.Header.Set("accept", "application/json")
+		req.Header.Set("Cookie", c.routeCookie())
+		client := &http.Client{Timeout: upstreamTimeout}
+		return client.Do(req)
+	}
+
+	dbg("execute(image) -> POST %s model=%q payload=%dB", endpoint, in.Model, len(in.body()))
+	res, err := do(c)
+	if err != nil {
+		dbg("execute(image) 上游请求失败: %v", err)
+		return upstreamFailure(err)
+	}
+	if res.StatusCode == http.StatusUnauthorized && c.PassToken != "" {
+		_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 64<<10))
+		res.Body.Close()
+		if rerr := renewServiceToken(in.AuthID, &c); rerr != nil {
+			return upstreamFailure(rerr)
+		}
+		res, err = do(c)
+		if err != nil {
+			return upstreamFailure(err)
+		}
+	}
+	defer res.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(res.Body, 32<<20))
+	if err != nil {
+		return errResult("upstream_error", "读取上游图像响应失败: "+err.Error(), 502)
+	}
+	dbg("execute(image) <- HTTP %d %dB", res.StatusCode, len(body))
+	if res.StatusCode >= 400 {
+		return upstreamError(res.StatusCode, body)
+	}
+	out := http.Header{}
+	if ct := res.Header.Get("content-type"); ct != "" {
+		out.Set("content-type", ct)
+	} else {
+		out.Set("content-type", "application/json")
+	}
+	return okResult(map[string]any{"Payload": body, "Headers": out})
 }
 
 /* ----------------------------------------------------------- 其它方法 */
