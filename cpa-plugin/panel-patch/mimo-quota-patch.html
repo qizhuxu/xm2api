@@ -1,6 +1,25 @@
 <!--
-  MiMo quota patch for CLIProxyAPI Management Center (v7.3.9 官方面板) — v7.2
+  MiMo quota patch for CLIProxyAPI Management Center (v7.3.9 官方面板) — v7.4
   ------------------------------------------------------------------
+  v7.4（找回 v7 的秒恢复）：
+  R7 对比 v7 为什么变卡：v7 有 lastHtml 快照，React 丢卡后立即恢复显示；
+     v7.1~v7.3 的 removeCards 连 html 快照一起清空，且 React 路由过渡期
+     grid 瞬时不存在时误清卡（实测切回 #/quota 后 grid 晚 2s+ 出现）⇒
+     数据反复被丢、只能等完整加载链。
+     修复：removeCards 只卸 DOM 保留快照（v7 语义），grid 过渡期跳过挂载
+     但保数据，彻底清空仅在 purgeAll（登出/插件禁用）。
+  R8 observer 风暴（v7.3 实测 evaluate 排队 57s 的根因）：
+     paintFromCache 在 observer 每次巡检里重算渲染，而 renderBody 的
+     「X 分钟后刷新」每次都变 ⇒ innerHTML 幂等比较永远不等 ⇒ 写 DOM →
+     observer → 重算无限循环，主线程堵死。
+     修复：巡检只恢复快照不重算；重算仅在数据刷新完成时。
+     实测点击导航 首访 259ms / 切回 184ms 出数据卡。
+  v7.3（即时显示，SWR）：
+  R6 quota 页总有占位→数据的跳变（不像 #/auth-files 原生即时）
+     根因：拉数据与画卡耦合，进页面必须等调度+API 往返。
+     修复：数据层 SWR 化 —— IIFE 执行即预取（早于 React 渲染 grid）、
+     sessionStorage 缓存跨刷新存活、进页面先画缓存 0 等待、60s 内
+     不重复拉取、各账号 quota 并行拉取、hashchange 去 300ms 延迟。
   v7.2（占位卡与加载速度）：
   R4 占位卡泄漏内部名 __boot__、其刷新按钮拿占位名匹配凭证
      修复：特殊名（_ 开头）标题显示「MiMo (Xiaomi) 剩余使用量」，
@@ -122,9 +141,9 @@
 .mq-card .mq-meta{color:#666;font-size:12px;margin:2px 0 6px}
 </style>
 <script>
-/* MiMo quota patch v7.2 — 见文件头注释。密钥只驻留内存变量，不落盘、不外发。 */
+/* MiMo quota patch v7.4 — 见文件头注释。密钥只驻留内存变量，不落盘、不外发。 */
 (function(){
-  if(window.__mimoQuotaPatch) return; window.__mimoQuotaPatch=7.2;
+  if(window.__mimoQuotaPatch) return; window.__mimoQuotaPatch=7.4;
 
   /* ================= 1. 会话密钥自动捕获（先于面板 bundle 执行） ================= */
   var KEY_EVT='mimo-key-captured';
@@ -392,9 +411,11 @@
      React 重渲染后按 name 归位/恢复，互不串数据。 */
   var cards={}; /* name -> {el, html} */
   function hostGrid(){ return document.querySelector('[class*="QuotaPage-module__grid"]'); }
-  function removeCards(){ for(var k in cards){ var c=cards[k]; if(c.el&&c.el.parentNode) c.el.parentNode.removeChild(c.el); } cards={}; }
-  function removeCardFor(name){ var c=cards[name]; if(c&&c.el&&c.el.parentNode) c.el.parentNode.removeChild(c.el); delete cards[name]; }
-  function bindCard(el,name){
+  /* 只卸 DOM、保留 html 快照（v7 lastHtml 秒恢复语义）—— React 重渲染/路由
+     切回时立即恢复显示，不重新走加载链。彻底清空交给 purgeAll。 */
+  function removeCards(){ for(var k in cards){ var c=cards[k]; if(c.el&&c.el.parentNode) c.el.parentNode.removeChild(c.el); c.el=null; } }
+  function wipeCards(){ removeCards(); cards={}; }
+  function removeCardFor(name){ var c=cards[name]; if(c&&c.el&&c.el.parentNode) c.el.parentNode.removeChild(c.el); delete cards[name]; }  function bindCard(el,name){
     var bs=el.querySelectorAll('[data-mq-refresh]');
     for(var i=0;i<bs.length;i++){
       bs[i].onclick=function(ev){
@@ -417,10 +438,13 @@
       '<div class="mq-tips" style="margin-top:6px">数据源：'+
       'GET /v0/management/plugins/mimo/quota（插件 quota_provider 标准端点）。</div>';
   }
-  /* P3：grid 不存在 / 登录页 ⇒ 一律不渲染；grid 存在时只做幂等归位，不打 API */
+  /* P3：grid 不存在 / 登录页 ⇒ 不渲染；grid 瞬时不存在（React 路由过渡）只跳过
+     挂载、保留数据 —— 实测切回 #/quota 后 grid 可晚 2s+ 出现，此处清卡会导致
+     数据反复被丢、只能等完整加载链（v7.1~v7.3 的「卡一会」根因之一）。 */
   function placeCards(){
     var g=hostGrid();
-    if(!g || loggedOut()){ removeCards(); return; }
+    if(loggedOut()){ removeCards(); return; }
+    if(!g) return;
     for(var name in cards){
       var c=cards[name];
       if(c.el && c.el.parentNode && document.body.contains(c.el)){
@@ -442,55 +466,72 @@
     if(c.el && document.body.contains(c.el) && c.el.innerHTML!==h){ c.el.innerHTML=h; bindCard(c.el,name); }
     return h;
   }
-  /* silent=true（自动刷新）：不写 loading，数据不变不动 DOM，杜绝闪烁 */
-  var retryTimer=null, busy=false;
-  async function doRefreshAll(silent){
+  /* ============== 6.5 数据层（SWR：缓存秒显 + 后台刷新 + 预取） ==============
+     像 #/auth-files 一样即时的关键：拉数据与画卡解耦 —— IIFE 执行即预取，
+     sessionStorage 缓存跨刷新存活；进页面先画缓存（stale-while-revalidate），
+     后台刷新后静默替换。quota 数据经 JSON round-trip 无损。 */
+  var CACHE_KEY='mq.quota.cache.v1';
+  var dataCache=null, retryTimer=null, busy=false;
+  function loadCache(){ try{ var s=sessionStorage.getItem(CACHE_KEY); if(s) dataCache=JSON.parse(s); }catch(e){} }
+  function saveCache(){ try{ sessionStorage.setItem(CACHE_KEY, JSON.stringify(dataCache)); }catch(e){} }
+  function cacheStale(){ return !dataCache || !dataCache.entries || !dataCache.entries.length || (Date.now()-(dataCache.ts||0))>60000; }
+  function paintFromCache(){
+    if(!dataCache || !dataCache.entries || !dataCache.entries.length) return false;
+    var live={};
+    for(var i=0;i<dataCache.entries.length;i++){
+      var e=dataCache.entries[i];
+      live[e.name]=1;
+      var q=e.q||{};
+      paintCard(cardFor(e.name), e.name, cardHeader(e.f||{name:e.name}),
+        (q.__error)?errorHtml(q.__error):renderBody(q));
+    }
+    for(var k in cards){ if(!live[k]) removeCardFor(k); }
+    loaded=true;
+    return true;
+  }
+  async function refreshData(silent){
     if(busy) return;
     busy=true;
     try{
-    var key=findKey();
-    if(!key){
-      /* key 未到：现有卡显示等待提示（幂等写入），并 2.5s 后重试 —— 2s 轮询
-         只归位不拉数据、60s 定时太慢，没有这段重试就只能干等 KEY_EVT。 */
-      var wh='<h3>MiMo (Xiaomi) 剩余使用量</h3><div class="mq-warn">'+
-        '正在等待面板会话密钥…若长时间未自动加载，请硬刷新本页（Ctrl+F5），无需任何手动配置。</div>';
-      for(var n in cards){
-        var c=cardFor(n); c.html=wh;
-        if(c.el&&document.body.contains(c.el)&&c.el.innerHTML!==wh) c.el.innerHTML=wh;
+      var key=findKey();
+      if(!key){
+        /* key 未到：有缓存先用缓存（不打扰），否则显示等待提示；2.5s 自动重试 */
+        if(!paintFromCache()){
+          var wh='<h3>MiMo (Xiaomi) 剩余使用量</h3><div class="mq-warn">'+
+            '正在等待面板会话密钥…若长时间未自动加载，请硬刷新本页（Ctrl+F5），无需任何手动配置。</div>';
+          for(var n in cards){ var c=cardFor(n); c.html=wh;
+            if(c.el&&document.body.contains(c.el)&&c.el.innerHTML!==wh) c.el.innerHTML=wh; }
+        }
+        if(!retryTimer){ retryTimer=setTimeout(function(){ retryTimer=null; maybeRender(true); },2500); }
+        return;
       }
-      if(!retryTimer){ retryTimer=setTimeout(function(){ retryTimer=null; maybeRender(true); },2500); }
-      return;
-    }
-    var en=await pluginEnabled(key);
-    if(!en){ invalidateEnabled(); purgeAll(); return; }
-    try{
+      var en=await pluginEnabled(key);
+      if(!en){ invalidateEnabled(); purgeAll(); return; }
       var files=await mimoAuthFiles(key);
-      if(!files.length){
-        var n0='__none__', c0=cardFor(n0);
-        paintCard(c0,n0,'<h3>MiMo (Xiaomi) 剩余使用量</h3>','<div class="mq-tips">auth-files 里没有 mimo 凭证。</div><div class="mq-tips" style="margin-top:6px">每 60 秒静默自动刷新。</div>');
-        placeCards(); return;
-      }
-      var live={};
-      for(var i=0;i<files.length;i++){
-        var f=files[i];
-        var name=f.name||f.auth_index||String(i);
-        live[name]=1;
-        var cc=cardFor(name);
-        var head=cardHeader(f);
-        if(!silent && cc.el) cc.el.innerHTML=head+loadingHtml();
-        var q=await fetchQuotaFor(key,f.auth_index||'');
-        paintCard(cc,name,head,(q&&q.__error)?errorHtml(q.__error):renderBody(q||{}));
-      }
-      for(var k in cards){ if(!live[k]) removeCardFor(k); } /* __boot__/__none__/过期卡一起清 */
-      loaded=true;
-      placeCards();
+      if(!files.length){ dataCache={ts:Date.now(),entries:[]}; saveCache(); return; }
+      /* 并行拉各账号 quota（原先串行，两账号两倍时延） */
+      var entries=await Promise.all(files.map(async function(f){
+        var name=f.name||f.auth_index||'x';
+        return { name:name, f:f, q:await fetchQuotaFor(key,f.auth_index||'') };
+      }));
+      dataCache={ts:Date.now(),entries:entries};
+      saveCache();
     }catch(e){
-      var he='<h3>MiMo (Xiaomi) 剩余使用量</h3>'+errorHtml(e.message||e);
-      for(var n2 in cards){ var c2=cards[n2]; c2.html=he; if(c2.el&&document.body.contains(c2.el)){ c2.el.innerHTML=he; bindCard(c2.el,n2); } }
-      if(!Object.keys(cards).length){ var cw=cardFor('__err__'); paintCard(cw,'__err__','',errorHtml(e.message||e)); placeCards(); }
-      loaded=false;
-    }
+      /* 拉取失败：有缓存保缓存；没缓存把错误画出来 */
+      if(!paintFromCache()){
+        var he='<h3>MiMo (Xiaomi) 剩余使用量</h3>'+errorHtml(e.message||e);
+        for(var n2 in cards){ var c2=cards[n2]; c2.html=he;
+          if(c2.el&&document.body.contains(c2.el)){ c2.el.innerHTML=he; bindCard(c2.el,n2); } }
+        if(!Object.keys(cards).length){ paintCard(cardFor('__err__'),'__err__','',errorHtml(e.message||e)); }
+        loaded=false;
+      }
     } finally { busy=false; }
+  }
+  async function doRefreshAll(silent){
+    await refreshData(silent);
+    if(paintFromCache()){ placeCards(); }
+    else if(!Object.keys(cards).length){ cardFor('__boot__'); placeCards(); }
+    else { placeCards(); }
   }
   async function doRefreshOne(name,silent){
     if(name && name.charAt(0)==='_') return doRefreshAll(silent); /* 占位卡整轮刷新 */
@@ -507,6 +548,13 @@
       if(!silent && c.el) c.el.innerHTML=head+loadingHtml();
       var q=await fetchQuotaFor(key,f.auth_index||'');
       paintCard(c,name,head,(q&&q.__error)?errorHtml(q.__error):renderBody(q||{}));
+      /* 同步进缓存 */
+      if(dataCache&&dataCache.entries){
+        for(var i=0;i<dataCache.entries.length;i++){
+          if(dataCache.entries[i].name===name){ dataCache.entries[i]={name:name,f:f,q:q}; }
+        }
+        dataCache.ts=Date.now(); saveCache();
+      }
     }catch(e){
       paintCard(c,name,'<h3>'+esc(name)+'</h3>',errorHtml(e.message||e));
     }
@@ -598,7 +646,7 @@
     }
   }
   function purgeAll(){
-    removeCards(); loaded=false;
+    wipeCards(); loaded=false;
     var els=document.querySelectorAll('[data-mq-inline]');
     for(var i=0;i<els.length;i++){ if(els[i].parentNode) els[i].parentNode.removeChild(els[i]); }
   }
@@ -612,13 +660,13 @@
      高频调度不产生 API 流量；用户重新启用插件后最多 30s 自动恢复。 */
   function renderPass(fetchData){
     if(isQuotaRoute() && !tabFilteredOut()){
-      /* 占位卡：数据/密钥未到也要有可见卡片（v7.0 数据驱动建卡导致首渲染全空） */
-      if(!Object.keys(cards).length) cardFor('__boot__');
+      /* 快照为空才从缓存恢复 —— 千万不能在 observer 的每次巡检里重算渲染：
+         renderBody 的「X 分钟后刷新」每次都变，innerHTML 幂等比较永远不等 ⇒
+         写 DOM→observer→重算的无限风暴会堵死主线程（v7.3 实测 evaluate 排队
+         57s 的根因）。重算只发生在数据刷新完成时（doRefreshAll）。 */
+      if(!Object.keys(cards).length){ if(!paintFromCache()) cardFor('__boot__'); }
       placeCards();
-      /* 状态驱动拉数据：调度参数 fetchData 只是加速器 —— #/login↔#/quota 路由
-         抖动会吃掉 schedule/KEY_EVT 的 fetchData=true（loggedOut 瞬时 true），
-         此后 2s 归位轮询必须自己发现「未加载」并补拉，否则只能等 60s 定时。 */
-      if(fetchData || (!loaded && !busy)){ doRefreshAll(true); }
+      if(fetchData || cacheStale()){ doRefreshAll(true); }
     } else if(Object.keys(cards).length){ removeCards(); }
     if(isAuthRoute()){ injectAuthQuotas(); }
     else {
@@ -645,7 +693,7 @@
     /* key 由密文刷新为明文（面板加密迁移场景）或首次捕获：重新过闸并加载 */
     maybeRender(true);
   });
-  window.addEventListener('hashchange',function(){ setTimeout(schedule,300); });
+  window.addEventListener('hashchange',function(){ schedule(); });
   /* P2 核心修复：observer 幂等重建（去掉 contains(card) 短路），
      React 把卡片从 grid 丢弃后同 tick 恢复，不再有 0~2s 空窗闪烁；
      渲染本身仍受 maybeRender 启用闸门约束（fetchData=false：只归位不打 API） */
@@ -653,6 +701,9 @@
     new MutationObserver(function(){ maybeRender(); }).observe(document.documentElement,{childList:true,subtree:true});
   }catch(e){}
   setInterval(function(){ maybeRender(); },2000);
+  /* 预取：IIFE 执行即拉数据（比 React 渲染 grid 早），DOM 就绪时数据已在缓存 ⇒ 秒显 */
+  loadCache();
+  refreshData(true);
   if(document.readyState==='loading'){ document.addEventListener('DOMContentLoaded',schedule); }
   else { schedule(); }
 })();
