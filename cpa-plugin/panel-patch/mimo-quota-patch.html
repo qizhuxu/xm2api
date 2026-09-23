@@ -1,6 +1,18 @@
 <!--
-  MiMo quota patch for CLIProxyAPI Management Center (v7.3.9 官方面板) — v7
+  MiMo quota patch for CLIProxyAPI Management Center (v7.3.9 官方面板) — v7.1
   ------------------------------------------------------------------
+  v7.1（实测 DOM 后的三处回归修复）：
+  R1 #/auth-files 刷新报「未匹配到凭证」
+     实测 DOM：mimo 卡没有 fileName 元素、文本无 .json/(userId)，
+     只有 account 元素（去扩展名 mimo-1000000001）⇒ fileNameOf 三级全空。
+     修复：优先取 account/fileName 元素原文，pickEntry 归一化后对
+     name/id/去扩展名三字段匹配。
+  R2 #/quota mimo 卡消失
+     根因：a) tabFilteredOut 把 tab='mimo' 当筛除（o.tab!=='all' 一刀切），
+     点 mimo 筛选反而全删；b) v7.0 数据驱动建卡，key/数据未到时首渲染全空。
+     修复：tab 名含 mimo 一律渲染；renderPass 先建 __boot__ 占位卡。
+  R3（v7.0 遗留说明见下）
+
   v7（多账号正确性）：
   Q1 #/quota 多账号挤在一张卡
      根因：doRefresh 把所有凭证的额度循环拼进单例 mq-card。
@@ -104,9 +116,9 @@
 .mq-card .mq-meta{color:#666;font-size:12px;margin:2px 0 6px}
 </style>
 <script>
-/* MiMo quota patch v7 — 见文件头注释。密钥只驻留内存变量，不落盘、不外发。 */
+/* MiMo quota patch v7.1 — 见文件头注释。密钥只驻留内存变量，不落盘、不外发。 */
 (function(){
-  if(window.__mimoQuotaPatch) return; window.__mimoQuotaPatch=7;
+  if(window.__mimoQuotaPatch) return; window.__mimoQuotaPatch=7.1;
 
   /* ================= 1. 会话密钥自动捕获（先于面板 bundle 执行） ================= */
   var KEY_EVT='mimo-key-captured';
@@ -159,7 +171,9 @@
       var s=sessionStorage.getItem('quotaPage.uiState');
       if(!s) return false;
       var o=JSON.parse(s);
-      return !!(o && typeof o.tab==='string' && o.tab && o.tab!=='all');
+      /* tab=all 或 tab 名含 mimo 都要渲染（实测：用户点 mimo 筛选 tab 时
+         o.tab='mimo'，旧逻辑 o.tab!=='all' 一刀切会把 mimo 卡全删）。 */
+      return !!(o && typeof o.tab==='string' && o.tab && o.tab!=='all' && !/mimo/i.test(o.tab));
     }catch(e){ return false; }
   }
   function findKey(){
@@ -445,8 +459,7 @@
         var q=await fetchQuotaFor(key,f.auth_index||'');
         paintCard(cc,name,head,(q&&q.__error)?errorHtml(q.__error):renderBody(q||{}));
       }
-      for(var k in cards){ if(k!=='__none__' && !live[k]) removeCardFor(k); }
-      if(cards.__none__ && files.length) removeCardFor('__none__');
+      for(var k in cards){ if(!live[k]) removeCardFor(k); } /* __boot__/__none__/过期卡一起清 */
       loaded=true;
       placeCards();
     }catch(e){
@@ -482,23 +495,34 @@
     return /mimo/i.test(t) && !/antigravity/i.test(t);
   }
   function fileNameOf(a){
-    var p=a.querySelector('p[class*="AuthFileCard-module__fileName"]');
+    /* 实测 DOM（panel-dom-dump.mjs）：mimo 卡没有 fileName 元素，卡内文本是
+       account（去扩展名，如 mimo-1000000001），无 .json、无 (userId)。
+       取 account/fileName 元素原文（去扩展名归一由 pickEntry 负责）。 */
+    var p=a.querySelector('[class*="AuthFileCard-module__account"]') ||
+           a.querySelector('p[class*="AuthFileCard-module__fileName"]') ||
+           a.querySelector('[class*="AuthFileCard-module__fileName"]');
     if(p && (p.textContent||'').trim()) return p.textContent.trim();
     var txt=a.innerText||'';
     var m=txt.match(/([A-Za-z0-9_.\-]+\.json)/);
     if(m) return m[1];
-    /* class/文件名都拿不到时按 label 里的 userId 反推（label 形如「mimo (1000000001) · …」） */
     var u=txt.match(/\((\d{6,})\)/);
     if(u) return 'mimo-'+u[1]+'.json';
     return '';
   }
-  /* 同名多条目时优先带用量 label 的那条（与 mimoAuthFiles 去重一致） */
+  /* 同名多条目时优先带用量 label 的那条（与 mimoAuthFiles 去重一致）；
+     name 可能是去扩展名的 account（mimo-1000000001）或完整文件名，
+     归一化后对 name / id / 去扩展名三个字段匹配。 */
   function pickEntry(files,name){
+    if(!name) return null;
+    var norm=String(name).replace(/\.json$/i,'');
     var hit=null;
     for(var i=0;i<files.length;i++){
-      if(files[i].name===name){
-        if(!hit){ hit=files[i]; }
-        else if(/\d%/.test(files[i].label||'') && !/\d%/.test(hit.label||'')){ hit=files[i]; }
+      var f=files[i];
+      var fn=(f.name||'').replace(/\.json$/i,'');
+      var fid=(f.id||'').replace(/\.json$/i,'');
+      if(fn===norm || fid===norm || (f.name||'')===name || (f.id||'')===name){
+        if(!hit){ hit=f; }
+        else if(/\d%/.test(f.label||'') && !/\d%/.test(hit.label||'')){ hit=f; }
       }
     }
     return hit;
@@ -564,8 +588,10 @@
      高频调度不产生 API 流量；用户重新启用插件后最多 30s 自动恢复。 */
   function renderPass(fetchData){
     if(isQuotaRoute() && !tabFilteredOut()){
+      /* 占位卡：数据/密钥未到也要有可见卡片（v7.0 数据驱动建卡导致首渲染全空） */
+      if(!Object.keys(cards).length) cardFor('__boot__');
       placeCards();
-      if(fetchData && findKey()){ doRefreshAll(true); }
+      if(fetchData){ doRefreshAll(true); } /* key 未到由 doRefreshAll 内部显示等待提示 */
     } else if(Object.keys(cards).length){ removeCards(); }
     if(isAuthRoute()){ injectAuthQuotas(); }
     else {

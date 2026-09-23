@@ -339,6 +339,43 @@ async function doProbe() {
   }
 }
 
+/** 额度 / 使用量查询 —— 直连上游 /api/user/usage（SSO Cookie 鉴权，不依赖反代在跑） */
+async function doUsage() {
+  let cookie = null;
+  try {
+    cookie = JSON.parse(fs.readFileSync(SESSION_OUT, "utf8"))?.routeCookieHeader || null;
+  } catch {}
+  if (!cookie) {
+    console.log(`  ${bad("❌ 凭证缺失")} —— 选 5 刷新凭证`);
+    return false;
+  }
+  try {
+    const res = await fetch(`${config.server.upstream}/api/user/usage`, {
+      headers: { cookie, accept: "application/json" },
+      signal: AbortSignal.timeout(30000),
+    });
+    const text = await res.text();
+    let j = null;
+    try {
+      j = JSON.parse(text);
+    } catch {}
+    if (res.status !== 200) {
+      console.log(`  ${bad(`❌ HTTP ${res.status}`)}  ${text.slice(0, 200)}`);
+      if (res.status === 401) console.log(warn("  → 凭证失效，选 5 刷新"));
+      return false;
+    }
+    const d = j?.data ?? j ?? {};
+    const pct = d.percent;
+    const head = pct !== undefined && pct !== null ? ok(`✅ 剩余 ${pct}%`) : ok("✅ 使用量");
+    console.log(`  ${head}  ${dim(JSON.stringify(d).slice(0, 200))}`);
+    if (d.resetDate) console.log(`    ${dim(`周期重置：${d.resetDate}`)}`);
+    return true;
+  } catch (e) {
+    console.log(`  ${bad("❌")} ${e.message}`);
+    return false;
+  }
+}
+
 /**
  * 统一的输入源。interactive() 启动时把 readline 的 async 迭代器挂到这里，
  * 这样 doAsk() 这类模块级动作也能借它读一行，而不用自己再开一个 readline
@@ -556,6 +593,7 @@ async function printHeader() {
   console.log("   5  刷新凭证          6  健康检查");
   console.log("   7  试问一句          8  查看抓包日志");
   console.log("   9  能力自检（工具调用 / 联网搜索）");
+  console.log("   10 使用量查询（额度）");
   console.log("   0  退出");
   console.log("");
 }
@@ -570,6 +608,7 @@ const ACTIONS = {
   7: doAsk,
   8: doShowLog,
   9: doCaps,
+  10: doUsage,
 };
 
 /**
@@ -638,6 +677,7 @@ const CLI = {
   refresh: doRefresh,
   log: doShowLog,
   caps: doCaps,
+  usage: doUsage,
 };
 
 if (cmd) {
