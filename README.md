@@ -25,8 +25,16 @@ npm run menu           # 交互式控制台（或双击 start.bat）
    5  刷新凭证          6  健康检查
    7  试问一句          8  查看抓包日志
    9  能力自检（工具调用 / 联网搜索）
+   10 使用量查询（额度）
+   11 获取账户凭证并保存（mimo.json）
    0  退出
 ```
+
+> **5 与 11 的分工**：`5 刷新凭证` 跑的是**反代运行时凭证**链路（复制 Cookies →
+> 读取账户凭证 → SSO 换 `serviceToken` → 保存 `data/sso-session.json`，其中
+> 读到的 `passToken/userId/cUserId` 也一并缓存进该文件）；`11 获取账户凭证并保存`
+> 是**账号级凭证**导出（提取 `passToken/userId/cUserId` → 保存 `data/mimo.json`，
+> CPA 插件 / Linux 部署要的就是这个格式，等价 `npm run cpa-auth`）。
 
 不想进菜单也可以直接用命令：
 
@@ -366,6 +374,7 @@ node creds.mjs --ensure       # 确保可用（有效则复用）
 npm run refresh                     # 强制重跑整条链路
 npm run probe                       # 打一次请求做健康检查
 node creds.mjs --check        # 只看 cookie 库当前能否复制
+npm run cpa-auth                    # 导出账户凭证 data/mimo.json（CPA 插件 / Linux 部署）
 ```
 
 整条链路（跑在 `creds.mjs`，与转发完全解耦）：

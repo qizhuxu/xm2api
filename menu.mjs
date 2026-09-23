@@ -9,6 +9,8 @@
  *   node menu.mjs status         状态 + 最近一次请求
  *   node menu.mjs probe          健康检查
  *   node menu.mjs caps           能力自检（工具调用 / 流式分片 / 联网搜索）
+ *   node menu.mjs usage          使用量 / 额度查询
+ *   node menu.mjs export         获取本机 MiMo 账户凭证并保存（data/mimo.json）
  *
  * 停止服务不依赖 pid 文件：先 POST /__xm2api/shutdown 让服务自己退，
  * 失败才退回 logs/server.pid + kill（服务可能是 npm run serve 启的，那样没有 pid 文件）。
@@ -377,6 +379,29 @@ async function doUsage() {
 }
 
 /**
+ * 获取本机 MiMo 账户凭证并保存。
+ *
+ * 从 MiMo 桌面客户端的 Chromium Cookie 库提取 passToken / userId / cUserId
+ * （账号级凭证，语义等同账号通行证），默认顺手做一次 SSO 校验后保存到
+ * data/mimo.json —— CPA 插件（auth/mimo.json）与 Linux 部署用的就是这个格式。
+ * 具体实现在 cpa-auth.mjs（npm run cpa-auth），这里只是菜单入口。
+ *
+ * 与选项 5 的分工：
+ *   5 刷新凭证   → sso-session.json（反代运行时凭证：serviceToken 会话）
+ *   11 获取账户凭证 → mimo.json（账号级凭证：passToken，可导出给 CPA 插件）
+ */
+function doExportCreds() {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [path.join(ROOT, "cpa-auth.mjs")], { cwd: ROOT, stdio: "inherit" });
+    child.on("close", (code) => resolve(code === 0));
+    child.on("error", (e) => {
+      console.log(`  ${bad("❌")} ${e.message}`);
+      resolve(false);
+    });
+  });
+}
+
+/**
  * 统一的输入源。interactive() 启动时把 readline 的 async 迭代器挂到这里，
  * 这样 doAsk() 这类模块级动作也能借它读一行，而不用自己再开一个 readline
  * （同一个 stdin 上开两个 interface 会互相抢输入）。
@@ -594,6 +619,7 @@ async function printHeader() {
   console.log("   7  试问一句          8  查看抓包日志");
   console.log("   9  能力自检（工具调用 / 联网搜索）");
   console.log("   10 使用量查询（额度）");
+  console.log("   11 获取账户凭证并保存（mimo.json）");
   console.log("   0  退出");
   console.log("");
 }
@@ -609,6 +635,7 @@ const ACTIONS = {
   8: doShowLog,
   9: doCaps,
   10: doUsage,
+  11: doExportCreds,
 };
 
 /**
@@ -678,6 +705,7 @@ const CLI = {
   log: doShowLog,
   caps: doCaps,
   usage: doUsage,
+  export: doExportCreds,
 };
 
 if (cmd) {
