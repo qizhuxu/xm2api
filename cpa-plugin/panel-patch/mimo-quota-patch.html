@@ -1,6 +1,29 @@
 <!--
-  MiMo quota patch for CLIProxyAPI Management Center (v7.3.9 官方面板) — v7.5
+  MiMo quota patch for CLIProxyAPI Management Center (v7.3.9 官方面板) — v7.6
   ------------------------------------------------------------------
+  v7.6（#/quota 卡片对齐官方 antigravity + 默认不显示额度、点击刷新后显示）：
+  R14 用户需求：#/quota 的 mimo 额度卡片与官方 antigravity 卡片对齐；
+     默认不显示额度，点击刷新后再显示。
+     实测取证（test/panel/panel-quota-align-recon*.mjs，官方卡逐字 dump）：
+      - 官方卡是 `article.QuotaCard-module__card` > header(iconWrap+icon|iconFallback,
+        fileName) + body(idleBody 大按钮「点击此处刷新额度」)；**加载页面时官方
+        不发任何额度请求**，点 idleBody 才拉取，数据相 body 是
+        `QuotaBody-module__*` 的 VO 结构，底部 actionRow>actionPill「刷新额度」；
+      - 旧版 mimo 卡：自造 `div.mq-card` 样式、加载即预取并直接显示数据 ——
+        结构与行为都没对齐（这正是用户看到的差异）。
+     修复：
+      a) 卡片壳逐字复刻 QuotaCard-module__*（card/cardEnter(--card-delay:0ms)/
+         head/iconWrap/iconFallback(无 logo 官方兜底，用字母 M)/fileName/body/
+         idleBody/idleGlyph/idleHint）——样式全部走官方 CSS，自造样式清零；
+      b) 数据相改用 QuotaBody-module__* 的 VO 复刻（与官方 loaded 相同构），
+         底部 actionRow>actionPill「刷新额度」（刷新中加 spinning），
+         失败相用 errorStrip；
+      c) 行为对齐：**默认不拉额度、不显示额度**（删掉 IIFE 预取与 sessionStorage
+         SWR，60s 定时也不再自动拉），只有用户点击 idleBody/refreshPill 才请求；
+         页面重载回默认态（不记上一次的额度）。
+      d) v7.5 的开关联动/禁用隐藏逻辑原样保留；#/auth-files 的额度区不受影响
+         （它本来就已是「点击此处刷新额度」的默认态，用 AuthFileQuota-module
+         类体系是该页官方原生 DOM，无需改动）。
   v7.5（开关联动即时化 + 禁用时整卡隐藏；修 v7.4.1 的致命语法错误）：
   R11 补丁整个不执行（用户实测：#/quota 两张 mimo 卡消失、
       #/auth-files 卡片里「点击此处刷新额度」按钮没了、控制台
@@ -184,17 +207,13 @@ article[class*="AuthFileCard-module__card"]{animation-delay:0s !important}
    用属性选择器而不是 inline style —— React 重建卡片时不会带上我们的 inline，
    但我们的每轮 renderPass 会重新打标记，属性+CSS 让中间态也不会“闪一下”。 */
 article[data-mq-hidden="1"]{display:none !important}
-.mq-card{padding:14px 16px;border:1px solid rgba(128,128,128,.35);border-radius:10px;
-  font:13px/1.6 system-ui,-apple-system,sans-serif;background:rgba(128,128,128,.06);margin:0 0 12px}
-.mq-card h3{margin:0 0 8px;font-size:14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.mq-tips{color:#888;font-size:12px}
-.mq-warn{color:#b26a00}
-.mq-card .mq-meta{color:#666;font-size:12px;margin:2px 0 6px}
+/* v7.6：#/quota 卡片不再有任何自造样式 —— 卡壳走 QuotaCard-module、数据相走
+   QuotaBody-module，全部复用面板 bundle 的官方 CSS（对齐 antigravity）。 */
 </style>
 <script>
-/* MiMo quota patch v7.5 — 见文件头注释。密钥只驻留内存变量，不落盘、不外发。 */
+/* MiMo quota patch v7.6 — 见文件头注释。密钥只驻留内存变量，不落盘、不外发。 */
 (function(){
-  if(window.__mimoQuotaPatch) return; window.__mimoQuotaPatch='7.5';
+  if(window.__mimoQuotaPatch) return; window.__mimoQuotaPatch='7.6';
 
   /* ================= 1. 会话密钥自动捕获（先于面板 bundle 执行） ================= */
   var KEY_EVT='mimo-key-captured';
@@ -290,8 +309,8 @@ article[data-mq-hidden="1"]{display:none !important}
       var row=el.closest?el.closest('article[class*="PluginsPage-module__pluginRow"]'):null;
       if(!row || !/mimo/i.test((row.innerText||'').slice(0,80))) return;
       invalidateEnabled();
-      setTimeout(function(){ maybeRender(true); },300);
-      setTimeout(function(){ maybeRender(true); },1500);
+      setTimeout(function(){ maybeRender(); },300);
+      setTimeout(function(){ maybeRender(); },1500);
     }catch(e){}
   },true);
 
@@ -393,7 +412,7 @@ article[data-mq-hidden="1"]{display:none !important}
   /* 门闸副作用：禁用 ⇒ 立刻清掉补丁画的东西（R12），启用 ⇒ 立刻重建 */
   function applyGate(enabled){
     try{
-      if(enabled){ gateAuthCards(true); maybeRender(true); }
+      if(enabled){ gateAuthCards(true); maybeRender(); }
       else purgeAll();
     }catch(e){}
   }
@@ -406,8 +425,8 @@ article[data-mq-hidden="1"]{display:none !important}
     }catch(e){}
     if(want===null){ invalidateEnabled(); }
     else { enCache={v:want,ts:Date.now()}; applyGate(want); }
-    setTimeout(function(){ if(want===null){ maybeRender(true); } },250);
-    setTimeout(function(){ invalidateEnabled(); maybeRender(true); },1500);
+    setTimeout(function(){ if(want===null){ maybeRender(); } },250);
+    setTimeout(function(){ invalidateEnabled(); maybeRender(); },1500);
   }
   function invalidateEnabled(){ enCache={v:null,ts:0}; }
   /* 调试/自检用只读快照（不含任何凭证）：
@@ -467,6 +486,51 @@ article[data-mq-hidden="1"]{display:none !important}
     }
     return c;
   }
+  /* ---- v7.6：#/quota 官方类名映射（bundle QuotaCard/QuotaBody CSS 实测提取，
+     与 antigravity 卡逐字一致 ⇒ 样式全部免费复用面板官方 CSS）---- */
+  var QC={
+    card:'QuotaCard-module__card___gsSw0', cardEnter:'QuotaCard-module__cardEnter___UF7tD',
+    head:'QuotaCard-module__head___vJx5a', iconWrap:'QuotaCard-module__iconWrap___xTv0M',
+    icon:'QuotaCard-module__icon___5ZUbX', iconFallback:'QuotaCard-module__iconFallback___i6gvn',
+    fileName:'QuotaCard-module__fileName___1QWup', body:'QuotaCard-module__body___QvXLv',
+    idleBody:'QuotaCard-module__idleBody___-LVRC', idleGlyph:'QuotaCard-module__idleGlyph___-MyUb',
+    idleHint:'QuotaCard-module__idleHint___ki8K6',
+    skeleton:'QuotaCard-module__skeleton___itY8q', skeletonRow:'QuotaCard-module__skeletonRow___I4TdX',
+    skeletonLabel:'QuotaCard-module__skeletonLabel___y0Wxn', skeletonTrack:'QuotaCard-module__skeletonTrack___GfCHZ',
+    errorStrip:'QuotaCard-module__errorStrip___XvHgW',
+    actionRow:'QuotaCard-module__actionRow___mzLCF', actionPill:'QuotaCard-module__actionPill___GQddc',
+    spinning:'QuotaCard-module__spinning___bpwYE'
+  };
+  var QB={
+    quotaMessage:'QuotaBody-module__quotaMessage___IiV5-',
+    quotaRow:'QuotaBody-module__quotaRow___-JMVn',
+    quotaRowHeader:'QuotaBody-module__quotaRowHeader___n2wsn',
+    quotaModel:'QuotaBody-module__quotaModel___wBOTG',
+    quotaMeta:'QuotaBody-module__quotaMeta___CiLdu',
+    quotaPercent:'QuotaBody-module__quotaPercent___osiSO',
+    quotaReset:'QuotaBody-module__quotaReset___Y0Tf1',
+    quotaResetRelativeSoon:'QuotaBody-module__quotaResetRelativeSoon___v6MAB',
+    quotaBar:'QuotaBody-module__quotaBar___eDsVI',
+    quotaBarFill:'QuotaBody-module__quotaBarFill___PAoP7',
+    quotaBarFillHigh:'QuotaBody-module__quotaBarFillHigh___B1-wA',
+    quotaBarFillMedium:'QuotaBody-module__quotaBarFillMedium___B53dC',
+    quotaBarFillLow:'QuotaBody-module__quotaBarFillLow___gX3vN',
+    antigravityQuotaGroup:'QuotaBody-module__antigravityQuotaGroup___Eala9',
+    antigravityQuotaGroupHeader:'QuotaBody-module__antigravityQuotaGroupHeader___Innz6',
+    antigravityQuotaGroupTitle:'QuotaBody-module__antigravityQuotaGroupTitle___gG6fV',
+    antigravityQuotaGroupDescription:'QuotaBody-module__antigravityQuotaGroupDescription___I9BdI',
+    codexPlan:'QuotaBody-module__codexPlan___yquoE',
+    codexPlanItem:'QuotaBody-module__codexPlanItem___HqY0k',
+    codexPlanLabel:'QuotaBody-module__codexPlanLabel___2-GjA',
+    codexPlanValue:'QuotaBody-module__codexPlanValue___x0NdC'
+  };
+  /* 官方 idleBody 里的刷新图标（循环箭头，bundle 实测 path 原文） */
+  var GLYPH_PATHS='<path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"></path><path d="M21 3v5h-5"></path>';
+  function glyphSvg(cls){
+    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" '+
+      'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" '+
+      'width="15" height="15" class="'+cls+'">'+GLYPH_PATHS+'</svg>';
+  }
   /* i18n：与 bundle zh 资源 antigravity_quota.* 逐字一致 */
   var T={idle:'点击此处刷新额度',loading:'正在加载额度...',loadFailed:'额度获取失败：',
     empty:'暂无额度数据',planLabel:'套餐',available:'额度可用',
@@ -508,8 +572,11 @@ article[data-mq-hidden="1"]{display:none !important}
     return '<div class="'+C.quotaBar+'"><div class="'+C.quotaBarFill+' '+fill+
       '" style="width:'+w+'%;--meter-index:'+idx+'"></div></div>';
   }
-  function renderBody(q,titlePrefix){
-    var C=authCls(), b=quotaBits(q), h='', idx=0;
+  /* C = 类名映射：#/quota 传 QB（QuotaBody-module），#/auth-files 传 authCls()。
+     同一套 VO 结构，两页各用官方自己的类体系（v7.6 对齐所需）。 */
+  function renderBody(q,titlePrefix,C){
+    C=C||authCls();
+    var b=quotaBits(q), h='', idx=0;
     if(b.plan){
       h+='<div class="'+C.codexPlan+'"><span class="'+C.codexPlanItem+'">'+
         '<span class="'+C.codexPlanLabel+'">'+T.planLabel+'</span>'+
@@ -555,10 +622,39 @@ article[data-mq-hidden="1"]{display:none !important}
   function errorHtml(msg){ var C=authCls(); return '<div class="'+C.quotaError+'">'+T.loadFailed+esc(msg)+'</div>'; }
   function actionsHtml(){ var C=authCls(); return '<div class="'+C.quotaCardActions+'"><button type="button" class="'+C.quotaMessage+' '+C.quotaMessageAction+'" data-mq-refresh>'+T.refreshBtn+'</button></div>'; }
 
-  /* ================= 6. #/quota 网格卡片（每账号一卡） ================= */
-  /* v7：不再单卡拼所有账号 —— 每个 mimo 凭证一张 mq-card（data-mq-name 标识），
-     React 重渲染后按 name 归位/恢复，互不串数据。 */
-  var cards={}; /* name -> {el, html} */
+  /* ---- v7.6：#/quota 卡片各状态的 body（QuotaCard-module 官方原语） ---- */
+  function qIdleHtml(){
+    return '<button type="button" class="'+QC.idleBody+'" data-mq-refresh>'+
+      glyphSvg(QC.idleGlyph)+'<span class="'+QC.idleHint+'">'+T.idle+'</span></button>';
+  }
+  function qSkeletonHtml(){
+    var row='<div class="'+QC.skeletonRow+'"><div class="'+QC.skeletonLabel+'"></div><div class="'+QC.skeletonTrack+'"></div></div>';
+    return '<div class="'+QC.skeleton+'">'+row+row+'</div>';
+  }
+  function qErrorHtml(msg){ return '<div class="'+QC.errorStrip+'">'+T.loadFailed+esc(msg)+'</div>'; }
+  function qActionRow(spin){
+    return '<div class="'+QC.actionRow+'"><button type="button" class="'+QC.actionPill+'" data-mq-refresh>'+
+      glyphSvg((spin?QC.spinning+' ':'')+QC.idleGlyph)+'<span>'+T.refreshBtn+'</span></button></div>';
+  }
+  /* 卡壳（与官方 antigravity 卡同构）：header(iconWrap+iconFallback, fileName) + body */
+  function qShell(name, bodyHtml){
+    return '<header class="'+QC.head+'">'+
+      '<span class="'+QC.iconWrap+'" title="MiMo"><span class="'+QC.iconFallback+'">M</span></span>'+
+      '<span class="'+QC.fileName+'" title="'+esc(name)+'">'+esc(name)+'</span>'+
+      '</header>'+
+      '<div class="'+QC.body+'">'+bodyHtml+'</div>';
+  }
+
+  /* ================= 6. #/quota 网格卡片（v7.6：官方 QuotaCard 同构，默认 idle） ================= */
+  /* 每个 mimo 凭证一张 article.QuotaCard-module__card，壳与状态机逐字对齐
+     antigravity 实测（recon*.mjs）：默认 body=idleBody「点击此处刷新额度」，
+     点击才拉额度；数据相 QuotaBody-module VO + actionPill「刷新额度」；
+     失败相 errorStrip。**不预取、不记 sessionStorage** —— 页面重载回默认态。
+     快照语义保留（R8/R9 防 observer 风暴）：React 重渲染后从 c.html 恢复，
+     巡检不重算渲染。 */
+  var cards={};       /* name -> {el, html, state, dataHtml, busy} */
+  var filesCache=null; /* mimoAuthFiles 账号清单（只拉它建卡；额度绝不自动拉） */
+  var accountsLoading=false;
   function hostGrid(){ return document.querySelector('[class*="QuotaPage-module__grid"]'); }
   /* 只卸 DOM、保留 html 快照（v7 lastHtml 秒恢复语义）—— React 重渲染/路由
      切回时立即恢复显示，不重新走加载链。彻底清空交给 purgeAll。 */
@@ -569,23 +665,11 @@ article[data-mq-hidden="1"]{display:none !important}
     for(var i=0;i<bs.length;i++){
       bs[i].onclick=function(ev){
         if(ev&&ev.preventDefault) ev.preventDefault();
-        /* __boot__/__none__/__err__ 是占位卡：整轮刷新，别拿占位名去匹配凭证 */
-        if(name && name.charAt(0)==='_') doRefreshAll(false);
-        else doRefreshOne(name,false);
+        /* __boot__/__none__/__err__ 是占位卡：重试拉账号清单，别拿占位名去匹配凭证 */
+        if(name && name.charAt(0)==='_'){ ensureAccounts(true); return; }
+        doRefreshOne(name);
       };
     }
-  }
-  function cardTitle(name){
-    return (name && name.charAt(0)==='_') ? 'MiMo (Xiaomi) 剩余使用量' : esc(name||'MiMo (Xiaomi) 剩余使用量');
-  }
-  function cardHeader(f){
-    var lbl=Array.isArray(f.label)?f.label.join(' | '):(f.label||'');
-    return '<h3>'+esc(f.name||'mimo')+'</h3>'+(lbl?('<div class="mq-meta">'+esc(lbl)+'</div>'):'');
-  }
-  function cardIdleHtml(name){
-    return '<h3>'+cardTitle(name)+'</h3><div>'+loadingHtml()+'</div>'+
-      '<div class="mq-tips" style="margin-top:6px">数据源：'+
-      'GET /v0/management/plugins/mimo/quota（插件 quota_provider 标准端点）。</div>';
   }
   /* P3：grid 不存在 / 登录页 ⇒ 不渲染；grid 瞬时不存在（React 路由过渡）只跳过
      挂载、保留数据 —— 实测切回 #/quota 后 grid 可晚 2s+ 出现，此处清卡会导致
@@ -599,120 +683,98 @@ article[data-mq-hidden="1"]{display:none !important}
       if(c.el && c.el.parentNode && document.body.contains(c.el)){
         if(c.el.parentNode!==g) g.appendChild(c.el);
       } else {
-        c.el=document.createElement('div'); c.el.className='mq-card'; c.el.setAttribute('data-mq-name',name);
+        c.el=document.createElement('article');
+        c.el.className=QC.card+' '+QC.cardEnter;
+        c.el.style.setProperty('--card-delay','0ms'); /* 与官方卡一致：同帧浮现 */
+        c.el.setAttribute('data-mq-name',name);
         g.appendChild(c.el);
-        c.el.innerHTML=c.html||cardIdleHtml(name); bindCard(c.el,name);
+        c.el.innerHTML=c.html||qShell(name,qIdleHtml()); bindCard(c.el,name);
       }
     }
   }
   function cardFor(name){
-    if(!cards[name]) cards[name]={el:null,html:''};
+    if(!cards[name]) cards[name]={el:null,html:'',state:'idle',dataHtml:'',busy:false};
     return cards[name];
   }
-  function paintCard(c,name,head,body){
-    var h=head+body+actionsHtml();
+  /* bodyHtml = body 内容（idle=大按钮；loading=skeleton；data=VO+actionPill；
+     error=errorStrip+actionPill）。卡壳由 qShell 统一组装 ⇒ 结构永远与官方一致。 */
+  function paintCard(c,name,bodyHtml){
+    var h=qShell(name,bodyHtml);
     c.html=h;
     if(c.el && document.body.contains(c.el) && c.el.innerHTML!==h){ c.el.innerHTML=h; bindCard(c.el,name); }
     return h;
   }
-  /* ============== 6.5 数据层（SWR：缓存秒显 + 后台刷新 + 预取） ==============
-     像 #/auth-files 一样即时的关键：拉数据与画卡解耦 —— IIFE 执行即预取，
-     sessionStorage 缓存跨刷新存活；进页面先画缓存（stale-while-revalidate），
-     后台刷新后静默替换。quota 数据经 JSON round-trip 无损。 */
-  var CACHE_KEY='mq.quota.cache.v1';
-  var dataCache=null, retryTimer=null, busy=false;
-  function loadCache(){ try{ var s=sessionStorage.getItem(CACHE_KEY); if(s) dataCache=JSON.parse(s); }catch(e){} }
-  function saveCache(){ try{ sessionStorage.setItem(CACHE_KEY, JSON.stringify(dataCache)); }catch(e){} }
-  function cacheStale(){ return !dataCache || !dataCache.entries || !dataCache.entries.length || (Date.now()-(dataCache.ts||0))>60000; }
-  /* 把数据渲染进快照（c.html）。数据版本（dataCache.ts）没变就绝不重算：
-     renderBody 的相对时间每次都变，重算必写 DOM ⇒ observer 风暴；
-     DOM 丢失/重挂是 placeCards 的职责（从快照恢复），与此无关。 */
-  var lastPaintTs=-1;
-  function paintFromCache(){
-    if(!dataCache || !dataCache.entries || !dataCache.entries.length) return false;
-    if(lastPaintTs===dataCache.ts && Object.keys(cards).length) return true;
-    var live={};
-    for(var i=0;i<dataCache.entries.length;i++){
-      var e=dataCache.entries[i];
-      live[e.name]=1;
-      var q=e.q||{};
-      paintCard(cardFor(e.name), e.name, cardHeader(e.f||{name:e.name}),
-        (q.__error)?errorHtml(q.__error):renderBody(q));
+  /* ============== 6.5 账号清单与点击加载（v7.6：额度只在用户点击后拉） ==============
+     旧版这里是 SWR 预取层（IIFE 预取 + sessionStorage + 60s 静默刷新），
+     加载即显示额度 —— 与官方 antigravity 行为不符，R14 全部移除。
+     现在：只拉一次 mimoAuthFiles（账号清单，即页面自己的
+     /v0/management/auth-files）用来建卡；额度请求仅由点击 idleBody/actionPill 触发。 */
+  async function ensureAccounts(force){
+    var key=findKey();
+    if(!key){
+      /* key 未到：占位 idle 卡（点它在 key 到手后重试），不发任何请求 */
+      if(!Object.keys(cards).length){ paintCard(cardFor('__boot__'),'__boot__',qIdleHtml()); placeCards(); }
+      return;
     }
-    for(var k in cards){ if(!live[k]) removeCardFor(k); }
-    loaded=true; lastPaintTs=dataCache.ts;
-    return true;
-  }
-  async function refreshData(silent){
-    if(busy) return;
-    busy=true;
-    try{
-      var key=findKey();
-      if(!key){
-        /* key 未到：有缓存先用缓存（不打扰），否则显示等待提示；2.5s 自动重试 */
-        if(!paintFromCache()){
-          var wh='<h3>MiMo (Xiaomi) 剩余使用量</h3><div class="mq-warn">'+
-            '正在等待面板会话密钥…若长时间未自动加载，请硬刷新本页（Ctrl+F5），无需任何手动配置。</div>';
-          for(var n in cards){ var c=cardFor(n); c.html=wh;
-            if(c.el&&document.body.contains(c.el)&&c.el.innerHTML!==wh) c.el.innerHTML=wh; }
-        }
-        if(!retryTimer){ retryTimer=setTimeout(function(){ retryTimer=null; maybeRender(true); },2500); }
+    if(!filesCache || force){
+      if(accountsLoading) return;
+      accountsLoading=true;
+      try{
+        var en=await pluginEnabled(key);
+        if(!en){ accountsLoading=false; invalidateEnabled(); purgeAll(); return; }
+        filesCache=await mimoAuthFiles(key);
+      }catch(e){
+        accountsLoading=false;
+        wipeCards();
+        paintCard(cardFor('__err__'),'__err__',qErrorHtml(e.message||e)+qActionRow(false));
+        placeCards();
         return;
       }
-      var en=await pluginEnabled(key);
-      if(!en){ invalidateEnabled(); purgeAll(); return; }
-      var files=await mimoAuthFiles(key);
-      if(!files.length){ dataCache={ts:Date.now(),entries:[]}; saveCache(); return; }
-      /* 并行拉各账号 quota（原先串行，两账号两倍时延） */
-      var entries=await Promise.all(files.map(async function(f){
-        var name=f.name||f.auth_index||'x';
-        return { name:name, f:f, q:await fetchQuotaFor(key,f.auth_index||'') };
-      }));
-      dataCache={ts:Date.now(),entries:entries};
-      saveCache();
-    }catch(e){
-      /* 拉取失败：有缓存保缓存；没缓存把错误画出来 */
-      if(!paintFromCache()){
-        var he='<h3>MiMo (Xiaomi) 剩余使用量</h3>'+errorHtml(e.message||e);
-        for(var n2 in cards){ var c2=cards[n2]; c2.html=he;
-          if(c2.el&&document.body.contains(c2.el)){ c2.el.innerHTML=he; bindCard(c2.el,n2); } }
-        if(!Object.keys(cards).length){ paintCard(cardFor('__err__'),'__err__','',errorHtml(e.message||e)); }
-        loaded=false;
-      }
-    } finally { busy=false; }
+      accountsLoading=false;
+    }
+    if(!filesCache || !filesCache.length){
+      wipeCards();
+      paintCard(cardFor('__none__'),'__none__',qIdleHtml());
+      placeCards();
+      return;
+    }
+    /* 同步 cards ↔ 账号清单：新增建 idle 卡、消失的移除、已存在的保留快照
+       （含用户已点出来的额度 —— 页面内切走切回不清空） */
+    var live={};
+    for(var i=0;i<filesCache.length;i++){
+      var name=filesCache[i].name||filesCache[i].auth_index||('x'+i);
+      live[name]=1;
+      if(!cards[name]){ paintCard(cardFor(name),name,qIdleHtml()); }
+    }
+    for(var k in cards){ if(!live[k]) removeCardFor(k); }
+    placeCards();
   }
-  async function doRefreshAll(silent){
-    await refreshData(silent);
-    if(paintFromCache()){ placeCards(); }
-    else if(!Object.keys(cards).length){ cardFor('__boot__'); placeCards(); }
-    else { placeCards(); }
-  }
-  async function doRefreshOne(name,silent){
-    if(name && name.charAt(0)==='_') return doRefreshAll(silent); /* 占位卡整轮刷新 */
+  /* 用户点击（idleBody / actionPill）才拉额度 —— 默认不显示（R14）。
+     已有数据时刷新走 spinning 转圈而不是退回 skeleton，不闪。 */
+  async function doRefreshOne(name){
+    if(!name || name.charAt(0)==='_'){ ensureAccounts(true); return; }
     var key=findKey();
     if(!key) return;
     var en=await pluginEnabled(key);
     if(!en){ invalidateEnabled(); purgeAll(); return; }
     var c=cardFor(name);
+    if(c.busy) return;
+    c.busy=true;
+    if(c.state==='data' && c.dataHtml){ paintCard(c,name,c.dataHtml+qActionRow(true)); }
+    else { c.state='loading'; paintCard(c,name,qSkeletonHtml()); }
     try{
-      var files=await mimoAuthFiles(key);
+      var files=filesCache||await mimoAuthFiles(key);
       var f=pickEntry(files,name);
       if(!f) throw new Error('未匹配到凭证 '+name);
-      var head=cardHeader(f);
-      if(!silent && c.el) c.el.innerHTML=head+loadingHtml();
       var q=await fetchQuotaFor(key,f.auth_index||'');
-      paintCard(c,name,head,(q&&q.__error)?errorHtml(q.__error):renderBody(q||{}));
-      /* 同步进缓存（数据版本变化 ⇒ paintFromCache 下次会重算） */
-      if(dataCache&&dataCache.entries){
-        for(var i=0;i<dataCache.entries.length;i++){
-          if(dataCache.entries[i].name===name){ dataCache.entries[i]={name:name,f:f,q:q}; }
-        }
-        dataCache.ts=Date.now(); saveCache();
-        lastPaintTs=-1;
-      }
+      if(q&&q.__error) throw new Error(q.__error);
+      c.state='data'; c.dataHtml=renderBody(q||{},'',QB);
+      paintCard(c,name,c.dataHtml+qActionRow(false));
     }catch(e){
-      paintCard(c,name,'<h3>'+esc(name)+'</h3>',errorHtml(e.message||e));
+      c.state='error'; c.dataHtml='';
+      paintCard(c,name,qErrorHtml(e.message||e)+qActionRow(false));
     }
+    c.busy=false;
   }
 
   /* ================= 7. #/auth-files 额度区（P4 官方同款 DOM） ================= */
@@ -823,7 +885,7 @@ article[data-mq-hidden="1"]{display:none !important}
     }
   }
   function purgeAll(){
-    wipeCards(); loaded=false;
+    wipeCards();
     var els=document.querySelectorAll('[data-mq-inline]');
     for(var i=0;i<els.length;i++){ if(els[i].parentNode) els[i].parentNode.removeChild(els[i]); }
     gateAuthCards(false); /* 禁用闸门：官方 mimo 卡片一并隐藏（R13） */
@@ -838,15 +900,12 @@ article[data-mq-hidden="1"]{display:none !important}
      v7.5：门闸状态不再只靠 TTL 轮询 —— 面板自己的开关动作（PATCH
      /v0/management/plugins/<id>/enabled）与 plugins 列表响应都会即时刷新缓存
      （见第 1、3 节），TTL 降到 10s 兜底 ⇒ 开关按下即生效，无需刷新页面。 */
-  function renderPass(fetchData){
+  function renderPass(){
     if(isQuotaRoute() && !tabFilteredOut()){
-      /* 快照为空才从缓存恢复 —— 千万不能在 observer 的每次巡检里重算渲染：
-         renderBody 的「X 分钟后刷新」每次都变，innerHTML 幂等比较永远不等 ⇒
-         写 DOM→observer→重算的无限风暴会堵死主线程（v7.3 实测 evaluate 排队
-         57s 的根因）。重算只发生在数据刷新完成时（doRefreshAll）。 */
-      if(!Object.keys(cards).length){ if(!paintFromCache()) cardFor('__boot__'); }
+      /* v7.6：只建 idle 卡（拉账号清单），额度绝不自动拉 —— 巡检永远不动
+         卡片内容（快照恢复语义），因此不存在 observer 风暴面。 */
+      ensureAccounts();
       placeCards();
-      if(fetchData || cacheStale()){ doRefreshAll(true); }
     } else if(Object.keys(cards).length){ removeCards(); }
     if(isAuthRoute()){ injectAuthQuotas(); }
     else {
@@ -854,25 +913,25 @@ article[data-mq-hidden="1"]{display:none !important}
       for(var i=0;i<inj.length;i++){ if(inj[i].parentNode) inj[i].parentNode.removeChild(inj[i]); }
     }
   }
-  function maybeRender(fetchData){
+  function maybeRender(){
     if(loggedOut()){ purgeAll(); return; }
     var key=findKey();
-    if(!key){ renderPass(fetchData); return; } /* 密钥未捕获：先渲染 idle，key 到手后 KEY_EVT 重新过闸 */
+    if(!key){ renderPass(); return; } /* 密钥未捕获：先渲染 idle，key 到手后 KEY_EVT 重新过闸 */
     pluginEnabled(key).then(function(ok){
       if(!ok){ purgeAll(); return; }
       gateAuthCards(true); /* 闸门放行 ⇒ 恢复被隐藏的官方 mimo 卡片（R13） */
-      renderPass(fetchData);
+      renderPass();
     });
   }
   function schedule(){
     if(loggedOut()){ purgeAll(); return; }
-    maybeRender(true); /* 路由进入/切换：过闸 + 静默加载数据 */
+    maybeRender(); /* 路由进入/切换：过闸 + 建 idle 卡（不拉额度） */
     if(timer) clearInterval(timer);
-    timer=setInterval(function(){ maybeRender(true); },60000); /* 60s 静默刷新 */
+    timer=setInterval(function(){ maybeRender(); },60000); /* 只做 DOM 归位，不拉数据（R14） */
   }
   window.addEventListener(KEY_EVT,function(){
-    /* key 由密文刷新为明文（面板加密迁移场景）或首次捕获：重新过闸并加载 */
-    maybeRender(true);
+    /* key 由密文刷新为明文（面板加密迁移场景）或首次捕获：重新过闸并建卡 */
+    maybeRender();
   });
   window.addEventListener('hashchange',function(){ schedule(); });
   /* P2 核心修复：observer 幂等重建（去掉 contains(card) 短路），
@@ -882,9 +941,8 @@ article[data-mq-hidden="1"]{display:none !important}
     new MutationObserver(function(){ maybeRender(); }).observe(document.documentElement,{childList:true,subtree:true});
   }catch(e){}
   setInterval(function(){ maybeRender(); },2000);
-  /* 预取：IIFE 执行即拉数据（比 React 渲染 grid 早），DOM 就绪时数据已在缓存 ⇒ 秒显 */
-  loadCache();
-  refreshData(true);
+  /* 预取（R14 移除）：额度不再预取 —— 建卡由 schedule/ensureAccounts 负责，
+     额度只在用户点击 idleBody/actionPill 后拉。 */
   if(document.readyState==='loading'){ document.addEventListener('DOMContentLoaded',schedule); }
   else { schedule(); }
 })();

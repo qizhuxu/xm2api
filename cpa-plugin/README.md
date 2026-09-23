@@ -510,6 +510,17 @@ CPA 升级后需重验。不想用图像时依旧可用 `exclude_models: ["Douba
      **前置**：config `remote-management.disable-auto-update-panel: true`
      （否则 updater 按 GitHub digest 覆写本地面板，实测源码
      `managementasset/updater.go:117,280`）。
+     **补丁 v7.6（#/quota 对齐官方 antigravity + 默认不显示额度，点击刷新后显示）**：
+     卡片壳逐字复刻 `QuotaCard-module__*`（header: iconWrap + iconFallback(无 logo
+     官方兜底字母 M) + fileName；body: idleBody 大按钮「点击此处刷新额度」+ 循环箭头
+     idleGlyph），数据相用 `QuotaBody-module__*` 的 VO 复刻 + `actionRow>actionPill`
+     「刷新额度」（刷新中 spinning），失败相 `errorStrip` —— 样式全部走面板官方 CSS，
+     自造样式清零。行为对齐（实测官方卡加载页面**不发任何额度请求**）：默认不显示
+     额度、不预取（v7.3 的 IIFE 预取 + sessionStorage SWR + 60s 静默刷新全部移除），
+     只有点击 idleBody/actionPill 才拉取；页面重载回默认态。
+     实测取证 `test/panel/panel-quota-align-recon*.mjs`（官方卡 HTML/CSS/点击行为逐字
+     dump），验收 `test/panel/panel-v76-verify.mjs`（9 项断言）+
+     `test/panel/panel-v75-verify.mjs`（开关联动回归，未被 v7.6 破坏）。
      验证脚本：`test/panel/panel-v75-verify.mjs`（上述三个问题逐条断言，
      含「不刷新页面」的开关联动）与 `test/panel/panel-quota-probe3.mjs`。
   其余实时位置：`POST /v0/management/quota/fetch`（curl/脚本）与
