@@ -106,7 +106,7 @@ func TestMatchModel(t *testing.T) {
 		{"mimo-v2.5-*", "mimo-v2.5-tts-voiceclone", true},
 		{"mimo-x-*-preview", "mimo-x-flash-preview", true},
 		{"Doubao-*", "mimo-x-flash-preview", false},
-		{"", "anything", false},                  // 空模式不匹配任何东西
+		{"", "anything", false}, // 空模式不匹配任何东西
 		{"mimo-v2.5-tts", "mimo-v2.5-tts-x", false},
 	}
 	for _, c := range cases {
@@ -243,6 +243,16 @@ func TestCredUsable(t *testing.T) {
 func TestAuthDataShape(t *testing.T) {
 	next := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
 	got := authData(mimoCred{Type: providerKey, ServiceToken: "s", UserID: "u1"}, "mimo.json", "", next)
+	// 多账号文件约定：文件名按 userId 隔离，空 userId 才退回历史单文件名。
+	if fn := authFileName("123"); fn != "mimo-123.json" {
+		t.Fatalf("authFileName(123) = %q", fn)
+	}
+	if fn := authFileName(""); fn != "mimo.json" {
+		t.Fatalf("authFileName(\"\") = %q", fn)
+	}
+	if ad := authData(mimoCred{Type: providerKey, ServiceToken: "s", UserID: "u9"}, "", "", next); ad["FileName"] != "mimo-u9.json" {
+		t.Fatalf("authData FileName 应按 userId 隔离: %v", ad["FileName"])
+	}
 
 	if got["Provider"] != providerKey {
 		t.Errorf("Provider = %v", got["Provider"])
@@ -452,12 +462,12 @@ func TestManagementRegisterShape(t *testing.T) {
 		t.Fatal("management.register 应当成功")
 	}
 	wantRoutes := map[string]string{
-		"/plugins/mimo/status":          "GET",
-		"/plugins/mimo/login/start":     "POST",
-		"/plugins/mimo/login/password":  "POST",
-		"/plugins/mimo/login/verify":    "POST",
-		"/plugins/mimo/login/cancel":    "POST",
-		"/plugins/mimo/login/status":    "GET",
+		"/plugins/mimo/status":         "GET",
+		"/plugins/mimo/login/start":    "POST",
+		"/plugins/mimo/login/password": "POST",
+		"/plugins/mimo/login/verify":   "POST",
+		"/plugins/mimo/login/cancel":   "POST",
+		"/plugins/mimo/login/status":   "GET",
 	}
 	if len(env.Result.Routes) != len(wantRoutes) {
 		t.Fatalf("路由注册不对: %+v", env.Result.Routes)
@@ -598,7 +608,7 @@ func TestQuotaFetchMapping(t *testing.T) {
 	in, _ := json.Marshal(map[string]any{"auth_id": "mimo-1", "provider": "mimo"})
 	raw := handleQuotaFetch(in)
 	var env struct {
-		OK     bool   `json:"ok"`
+		OK     bool `json:"ok"`
 		Result struct {
 			Summary []struct {
 				Key   string  `json:"key"`
@@ -790,7 +800,7 @@ func TestLiveSSORefresh(t *testing.T) {
 
 	req, _ := json.Marshal(map[string]any{"AuthID": "live-test", "StorageJSON": raw})
 	var env struct {
-		OK     bool `json:"ok"`
+		OK     bool                      `json:"ok"`
 		Error  *struct{ Message string } `json:"error"`
 		Result struct {
 			Auth struct {
@@ -862,8 +872,8 @@ func TestLiveReactiveRefresh(t *testing.T) {
 
 	start := time.Now()
 	var env struct {
-		OK     bool `json:"ok"`
-		Error  *struct {
+		OK    bool `json:"ok"`
+		Error *struct {
 			Message string `json:"message"`
 		} `json:"error"`
 		Result struct {
@@ -1079,7 +1089,7 @@ func TestAuthLoginStartPollRPCBridge(t *testing.T) {
 	}
 
 	a := poll.Result.Auth
-	if a.Provider != "mimo" || a.FileName != "mimo.json" || a.ID != "mimo-4242" {
+	if a.Provider != "mimo" || a.FileName != "mimo-4242.json" || a.ID != "mimo-4242" {
 		t.Fatalf("Auth = %+v", a)
 	}
 	var stored mimoCred
@@ -1236,7 +1246,7 @@ func TestPasswordLoginFlow(t *testing.T) {
 	if !ok.OK {
 		t.Fatalf("密码正确应成功: %s", raw)
 	}
-	if ok.Result.Status != "success" || ok.Result.UserID != "77" || ok.Result.AuthFile != "mimo.json" {
+	if ok.Result.Status != "success" || ok.Result.UserID != "77" || ok.Result.AuthFile != "mimo-77.json" {
 		t.Fatalf("result = %+v", ok.Result)
 	}
 	for _, secret := range []string{"correct-horse", "wrongpw", "whatever"} {
@@ -1256,7 +1266,7 @@ func TestPasswordLoginFlow(t *testing.T) {
 
 	// cookie 通道：location 响应靠 Set-Cookie 下发 passToken（真实小米的典型形态）
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	tok, err := collectTokensFromLocation(client, passAuth2URL[:strings.Index(passAuth2URL, "/pass/")] + "/cookie-only", "mimopc")
+	tok, err := collectTokensFromLocation(client, passAuth2URL[:strings.Index(passAuth2URL, "/pass/")]+"/cookie-only", "mimopc")
 	if err != nil || tok.PassToken != "V1:ck" || tok.UserID != "55" || tok.CUserID != "c55" {
 		t.Fatalf("cookie 通道收集失败 tok=%+v err=%v", tok, err)
 	}
@@ -1403,14 +1413,20 @@ func TestUsageLabelAndLoginPage(t *testing.T) {
 
 	page := renderLoginPage(nil, "")
 	for _, needle := range []string{
-		"pwKey",                                          // 管理密钥输入框
-		"/v0/management/plugins/mimo/login/password",     // 提交走管理路由
-		"X-Management-Key",                               // 鉴权 header
-		"sessionStorage",                                 // 密钥只存标签页
-		"提交失败：服务器返回 HTTP",                        // 非 JSON 防御文案
+		"x-mimo-req",       // 免管理密钥提交通道（payload 放自定义头）
+		"reqOp('password'", // 资源路由 GET 提交账密
+		"reqOp('verify'",   // 资源路由 GET 提交验证码
+		"无需 CPA 管理密钥",      // 免密钥提示
+		"提交失败：服务器返回 HTTP",  // 非 JSON 防御文案
 	} {
 		if !strings.Contains(page, needle) {
 			t.Fatalf("登录页缺少 %q", needle)
+		}
+	}
+	// 免密钥设计回归锁：管理密钥输入框/管理路由提交/密钥暂存不得回归
+	for _, banned := range []string{"pwKey", "X-Management-Key", "sessionStorage", "/v0/management/plugins/mimo/login/password"} {
+		if strings.Contains(page, banned) {
+			t.Fatalf("登录页不应再出现 %q（免管理密钥设计）", banned)
 		}
 	}
 	// 密码绝不进页面

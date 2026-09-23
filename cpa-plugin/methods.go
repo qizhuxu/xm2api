@@ -44,7 +44,7 @@ const (
 	methodHostStreamEmit      = "host.stream.emit"
 	methodHostStreamClose     = "host.stream.close"
 	methodHostLog             = "host.log"
-	methodHostAuthList = "host.auth.list"
+	methodHostAuthList        = "host.auth.list"
 	// host.auth.get: {"auth_index":"..."} → {auth_index,name,path,json}（凭证 JSON 原文）。
 	methodHostAuthGet = "host.auth.get"
 	// host.auth.save: {name(必须 .json), json(字节,JSON 里为 base64)} → 原样写入

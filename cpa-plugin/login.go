@@ -120,10 +120,10 @@ type qrSession struct {
 // sendPhoneTicket 发短信 → 用户收码 → verifyPhone 提交 ticket →
 // GET location（set cookie）→ 重跑 serviceLogin 直接返回完整凭证。
 type otpState struct {
-	Flag    int       `json:"flag,omitempty"`   // 4=手机 8=邮箱
-	Method  string    `json:"method,omitempty"` // Phone / Email
-	Notify  string    `json:"notify,omitempty"` // 掩码（138****1234），登录页展示用
-	SentAt  time.Time `json:"sent_at,omitempty"`
+	Flag   int       `json:"flag,omitempty"`   // 4=手机 8=邮箱
+	Method string    `json:"method,omitempty"` // Phone / Email
+	Notify string    `json:"notify,omitempty"` // 掩码（138****1234），登录页展示用
+	SentAt time.Time `json:"sent_at,omitempty"`
 
 	Context  string         `json:"-"` // notificationUrl 的 context
 	SID      string         `json:"-"` // 验证流程使用的 sid
@@ -310,7 +310,7 @@ func handleLoginStart(req []byte) []byte {
 // handleAuthLoginStartRPC —— 面板 #/oauth「SSO 登录」的第一步。
 // 宿主契约（sdk/pluginapi.AuthLoginStartResponse）：
 // {Provider, URL, State, ExpiresAt, Metadata}。State 必须过 ValidateOAuthState
-//（[A-Za-z0-9._-]），否则宿主回 502 invalid oauth state —— 这正是旧实现「不能用」的原因。
+// （[A-Za-z0-9._-]），否则宿主回 502 invalid oauth state —— 这正是旧实现「不能用」的原因。
 func handleAuthLoginStartRPC(req []byte) []byte {
 	var in struct {
 		Provider string         `json:"Provider"`
@@ -403,7 +403,7 @@ func authPayloadForSession(s *qrSession, c mimoCred) map[string]any {
 
 	authID := deriveAuthID(c)
 	next := time.Now().Add(refreshAfter())
-	ad := authData(c, providerKey+".json", authID, next)
+	ad := authData(c, authFileName(c.UserID), authID, next)
 
 	qrStore.Lock()
 	s.payload = ad
@@ -486,6 +486,9 @@ func otpDo(otp *otpState, method, urlStr string, body io.Reader) ([]byte, error)
 	}
 	req.Header.Set("User-Agent", otpUA)
 	req.Header.Set("Accept", "application/json, text/html")
+	// 小米 identity 接口的来源防护：前端 XMLHttpRequest 一律带这个头，
+	// sendEmailTicket 缺它恒 66108（2026-09-23 抓包实锤，见 otp-sendcode-recon.mjs）。
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
@@ -604,20 +607,32 @@ func startOTPVerification(ntf, sid string) (*otpState, error) {
 		return nil, fmt.Errorf("触发小米验证码失败: code=%d %s", otpCode(tm), otpDesc(tm))
 	}
 
-	// Step 4：手机验证需再 POST sendPhoneTicket 真正下发短信
-	if method == "Phone" {
-		form := url.Values{"retry": {"0"}, "icode": {""}, "_json": {"true"}}
-		rawSend, err := otpDo(otp, http.MethodPost, qrLoginProvider+"/identity/auth/sendPhoneTicket", strings.NewReader(form.Encode()))
-		if err != nil {
-			return nil, fmt.Errorf("发送小米短信验证码失败: %w", err)
-		}
-		if sm := otpParseJSON(rawSend); otpCode(sm) != -1 && otpCode(sm) != 0 {
-			return nil, fmt.Errorf("发送小米短信验证码失败: code=%d %s", otpCode(sm), otpDesc(sm))
-		}
+	// Step 4：真正下发验证码。verifyEmail/verifyPhone GET 只是初始化验证会话
+	// （返回 maskedEmail/contentType），真正发码是 POST send{Email,Phone}Ticket，
+	// body 与短信完全一致（retry=0&icode=&_json=true）。
+	// 2026-09-23 抓包实锤（mimo_calw/scripts/otp-sendcode-recon.mjs）：缺
+	// X-Requested-With 时 sendEmailTicket 恒 66108 —— 历史上"邮箱发码 API 逆向
+	// 失败"的真正原因。此前本函数只给 Phone 发码，Email 账号永远收不到邮件。
+	sendURL := fmt.Sprintf("%s/identity/auth/send%sTicket?_dc=%d", qrLoginProvider, method, time.Now().UnixMilli())
+	form := url.Values{"retry": {"0"}, "icode": {""}, "_json": {"true"}}
+	rawSend, err := otpDo(otp, http.MethodPost, sendURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("发送小米%s验证码失败: %w", methodCN(method), err)
+	}
+	if sm := otpParseJSON(rawSend); otpCode(sm) != -1 && otpCode(sm) != 0 {
+		return nil, fmt.Errorf("发送小米%s验证码失败: code=%d %s", methodCN(method), otpCode(sm), otpDesc(sm))
 	}
 
 	otp.SentAt = time.Now()
 	return otp, nil
+}
+
+// methodCN 把 Phone/Email 映射成中文，用于错误文案。
+func methodCN(method string) string {
+	if method == "Email" {
+		return "邮箱"
+	}
+	return "短信"
 }
 
 // otpSubmit：用户提交验证码 → 完成身份验证 → 重跑 serviceLogin 拿完整凭证。
@@ -632,8 +647,10 @@ func otpSubmit(otp *otpState, code string) (*qrTokens, error) {
 	}
 
 	// Step 6：POST verify{Phone|Email} 提交验证码
+	// trust=true：向小米声明「信任此设备」，降低后续账密登录再触发
+	// 「新设备保护」邮箱验证的频率（实测每次 API 登录都触发 securityStatus=16）。
 	vURL := fmt.Sprintf("%s/identity/auth/verify%s?_dc=%d", qrLoginProvider, otp.Method, time.Now().UnixMilli())
-	form := url.Values{"_flag": {strconv.Itoa(otp.Flag)}, "ticket": {code}, "trust": {"false"}, "_json": {"true"}}
+	form := url.Values{"_flag": {strconv.Itoa(otp.Flag)}, "ticket": {code}, "trust": {"true"}, "_json": {"true"}}
 	rawV, err := otpDo(otp, http.MethodPost, vURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("提交验证码失败: %w", err)
@@ -662,15 +679,11 @@ func otpSubmit(otp *otpState, code string) (*qrTokens, error) {
 	if c := otpCode(pm); c != 0 {
 		return nil, fmt.Errorf("验证完成但恢复登录失败: code=%d %s", c, otpDesc(pm))
 	}
-	tok := &qrTokens{}
-	if s, _ := pm["passToken"].(string); s != "" {
-		tok.PassToken = s
-	}
-	if s, _ := pm["userId"].(string); s != "" {
-		tok.UserID = s
-	}
-	if s, _ := pm["cUserId"].(string); s != "" {
-		tok.CUserID = s
+	// 全树扫描取凭证（findQRTokens 对 userId 兼容 string/number —— 真实响应里
+	// userId 是 JSON 数字，直接 .(string) 断言会静默取空，实测踩过）。
+	tok := findQRTokens(rawP)
+	if tok == nil {
+		tok = &qrTokens{}
 	}
 	// 兜底：location（Set-Cookie/query 里收 passToken）
 	if tok.PassToken == "" {
@@ -924,6 +937,18 @@ func handleLoginPassword(req []byte) []byte {
 		s = newBareSession(config().SID)
 	}
 
+	// 自动收码准备：配置了 otp_auto_mail 且账号是邮箱时，先取收件箱基线
+	// （发码前的时间截面），OTP 触发后由 autoOTPWorker 无人值守完成收码+提交。
+	var mailBox *otpMailBox
+	var mailBaseline map[string]bool
+	if mc, addr := autoMailFor(user); mc != nil {
+		if box, base, err := connectMailbox(*mc, addr); err == nil {
+			mailBox, mailBaseline = box, base
+		} else {
+			dbg("auto-otp: 收件箱连接失败（降级人工输入）: %v", err)
+		}
+	}
+
 	tok, err := passwordAuthenticate(s.SID, user, in.Password)
 	if err != nil {
 		// 小米「新设备保护」：验证码已自动发出，进入等待输入状态（非错误）
@@ -942,12 +967,18 @@ func handleLoginPassword(req []byte) []byte {
 				target = "绑定的" + methodCN
 			}
 			msg := fmt.Sprintf("小米要求新设备验证：验证码已发送到 %s，请在下方输入验证码完成登录", target)
+			if mailBox != nil {
+				msg += "（已开启自动收码，通常无需手动操作）"
+			}
 			qrStore.Lock()
 			s.Mode = "password"
 			s.OTP = oe.OTP
 			s.Status = "awaiting-otp"
 			s.Message = msg
 			qrStore.Unlock()
+			if mailBox != nil && oe.OTP != nil {
+				go autoOTPWorker(s, oe.OTP, mailBox, mailBaseline)
+			}
 			otpInfo := map[string]any{}
 			if oe.OTP != nil {
 				otpInfo = map[string]any{"method": oe.OTP.Method, "notify": oe.OTP.Notify}
@@ -1173,7 +1204,10 @@ func finishLogin(s *qrSession, tok *qrTokens) {
 		setQRStatus(s, "failed", "凭证序列化失败: "+merr.Error())
 		return
 	}
-	if err := hostAuthSave(providerKey+".json", raw); err != nil {
+	// 每账号一个 auth 文件（mimo-<userId>.json）：多账号并存互不顶替，
+	// 同一账号重登/续期覆盖同名文件。
+	fname := authFileName(c.UserID)
+	if err := hostAuthSave(fname, raw); err != nil {
 		setQRStatus(s, "failed", "凭证已获取但写入 auth 目录失败: "+err.Error())
 		return
 	}
@@ -1189,11 +1223,11 @@ func finishLogin(s *qrSession, tok *qrTokens) {
 	qrStore.Lock()
 	s.Status = status
 	s.UserID = c.UserID
-	s.AuthFile = providerKey + ".json"
+	s.AuthFile = fname
 	s.cred = &c
-	s.Message = fmt.Sprintf("%s（userId %s → auth/%s.json，宿主热加载生效）", msg, c.UserID, providerKey)
+	s.Message = fmt.Sprintf("%s（userId %s → auth/%s，宿主热加载生效）", msg, c.UserID, fname)
 	qrStore.Unlock()
-	hostLog("info", fmt.Sprintf("MiMo 登录成功：userId=%s，凭证已写入 auth/%s.json", c.UserID, providerKey))
+	hostLog("info", fmt.Sprintf("MiMo 登录成功：userId=%s，凭证已写入 auth/%s", c.UserID, fname))
 }
 
 /* ------------------------------------------------- login.cancel / status */
@@ -1300,12 +1334,10 @@ button.go{width:100%;padding:10px;margin-top:8px;border:0;border-radius:8px;back
 	b.WriteString(`<div class="pane" id="panePW">
 <div class="tips" style="text-align:left">输入小米账号（手机号/邮箱）与密码，插件直接向小米
 passport 换取 passToken。密码仅在内存中使用，不落盘、不写日志、不回显。<br>
-提交还需要 <b>CPA 管理密钥</b>（面板登录时输入的那个）：CPA 宿主的资源路由只转发 GET，
-密码提交必须走管理 API（<code>POST /v0/management/plugins/mimo/login/password</code>）。
-密钥只保存在本浏览器标签页的 sessionStorage，随页关闭消失。</div>
+<b>无需 CPA 管理密钥</b>：提交走本页一次性会话的资源路由（GET + 加密头），与扫码页同一暴露面。<br>
+若小米要求新设备验证：已配置自动收码的邮箱会<b>自动</b>收到并提交验证码；否则在下方手动输入。</div>
 <input id="pwUser" placeholder="小米账号（手机号 / 邮箱 / ID）" autocomplete="off">
 <input id="pwPass" type="password" placeholder="密码" autocomplete="off">
-<input id="pwKey" type="password" placeholder="CPA 管理密钥" autocomplete="off">
 <button class="go" id="pwGo" type="button">登录</button>
 <div class="tips" id="pwMsg"></div>
 <div id="pwOtpBox" style="display:none;margin-top:10px;border-top:1px dashed #d4d4d8;padding-top:8px">
@@ -1348,35 +1380,35 @@ function tab(which){ const q=which==='qr';
   pQR.classList.toggle('on',q); pPW.classList.toggle('on',!q); }
 tQR.onclick=()=>tab('qr'); tPW.onclick=()=>tab('pw');
 // 密码登录：宿主资源路由 ServeResourceHTTP 只转发 GET（POST 直接 404 空体，
-// 页面 JSON.parse 崩成 "Unexpected end of JSON input"），因此提交走管理路由
-// /v0/management/plugins/mimo/login/password（ServeManagementHTTP 任意 method），
-// 用 CPA 管理密钥鉴权；密钥只存 sessionStorage。
-const KEY_STORE='cpa-mgmt-key';
+// 实测 v7.3.9）。提交走资源路由 GET + x-mimo-req 头（base64 JSON）：
+// 密码不进 URL（不进宿主访问日志）、不需要管理密钥、随本页一次性会话过期。
 const pwMsg=document.getElementById('pwMsg');
-const keyEl=document.getElementById('pwKey');
-try{ keyEl.value=sessionStorage.getItem(KEY_STORE)??''; }catch(e){}
+function encReq(obj){
+  const bytes=new TextEncoder().encode(JSON.stringify(obj));
+  let bin=''; bytes.forEach(b=>{bin+=String.fromCharCode(b);});
+  return btoa(bin);
+}
+async function reqOp(op,payload){
+  const r=await fetch('?session='+encodeURIComponent(sid)+'&op='+op,{
+    method:'GET',
+    headers:{'accept':'application/json','x-mimo-req':encReq(payload)}});
+  const txt=await r.text(); let j=null; try{ j=JSON.parse(txt); }catch(e){}
+  return {r,txt,j};
+}
 document.getElementById('pwGo').onclick=async()=>{
   const u=document.getElementById('pwUser').value.trim();
   const p=document.getElementById('pwPass').value;
-  const k=keyEl.value.trim();
   if(!u||!p){ pwMsg.textContent='账号和密码都要填'; pwMsg.className='tips bad'; return; }
-  if(!k){ pwMsg.textContent='还需要填写 CPA 管理密钥（本页所在 CPA 的管理密钥，即面板登录时输入的那个）'; pwMsg.className='tips bad'; return; }
   pwMsg.textContent='正在向小米 passport 提交…'; pwMsg.className='tips warn';
   document.getElementById('pwPass').value='';   // 提交后立即清空密码输入框
-  try{ sessionStorage.setItem(KEY_STORE,k); }catch(e){}
   try{
-    const r=await fetch('/v0/management/plugins/mimo/login/password',{
-      method:'POST',
-      headers:{'content-type':'application/json','Authorization':'Bearer '+k,'X-Management-Key':k},
-      body:JSON.stringify({session:sid,user:u,password:p})});
-    const txt=await r.text();
-    let j=null; try{ j=JSON.parse(txt); }catch(e){}
+    const {r,txt,j}=await reqOp('password',{session:sid,user:u,password:p});
     if(!j){
       pwMsg.textContent='提交失败：服务器返回 HTTP '+r.status+(txt?('（'+txt.slice(0,160)+'）'):'（空响应）');
       pwMsg.className='tips bad'; return;
     }
     const d=j.result ?? j;
-    if(!r.ok || d.error){ pwMsg.innerHTML=linkify(d.error ?? ('HTTP '+r.status)); pwMsg.className='tips bad'; }
+    if(!r.ok || d.error){ pwMsg.innerHTML=linkify(typeof d.error==='string'?d.error:('HTTP '+r.status)); pwMsg.className='tips bad'; }
     else {
       pwMsg.innerHTML=linkify(d.message??'登录完成'); pwMsg.className='tips ok'; apply(d);
       if(d.status==='awaiting-otp'){ showOtp(d.message); }
@@ -1389,20 +1421,14 @@ function showOtp(msg){ otpHint.textContent=(msg||'小米要求验证，请输入
 function hideOtp(){ otpBox.style.display='none'; }
 document.getElementById('pwOtpGo').onclick=async()=>{
   const code=document.getElementById('pwOtpCode').value.trim();
-  const k=keyEl.value.trim();
   if(!code){ pwMsg.textContent='请输入收到的验证码'; pwMsg.className='tips bad'; return; }
-  if(!k){ pwMsg.textContent='缺少 CPA 管理密钥'; pwMsg.className='tips bad'; return; }
   pwMsg.textContent='正在提交验证码…'; pwMsg.className='tips warn';
   document.getElementById('pwOtpCode').value='';
   try{
-    const r=await fetch('/v0/management/plugins/mimo/login/verify',{
-      method:'POST',
-      headers:{'content-type':'application/json','Authorization':'Bearer '+k,'X-Management-Key':k},
-      body:JSON.stringify({session:sid,code:code})});
-    const txt=await r.text(); let j=null; try{ j=JSON.parse(txt); }catch(e){}
+    const {r,txt,j}=await reqOp('verify',{session:sid,code:code});
     if(!j){ pwMsg.textContent='提交失败：服务器返回 HTTP '+r.status+(txt?('（'+txt.slice(0,160)+'）'):'（空响应）'); pwMsg.className='tips bad'; return; }
     const d=j.result ?? j;
-    if(!r.ok || d.error){ pwMsg.innerHTML=linkify(d.error ?? ('HTTP '+r.status)); pwMsg.className='tips bad'; }
+    if(!r.ok || d.error){ pwMsg.innerHTML=linkify(typeof d.error==='string'?d.error:('HTTP '+r.status)); pwMsg.className='tips bad'; }
     else { pwMsg.innerHTML=linkify(d.message??'登录完成'); pwMsg.className='tips ok'; apply(d); hideOtp(); }
   }catch(e){ pwMsg.textContent='提交失败: '+e; pwMsg.className='tips bad'; }
 };

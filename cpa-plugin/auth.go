@@ -109,7 +109,8 @@ type ssoResult struct {
 //
 // 阶段 1：拿 location / ssecurity / nonce
 // 阶段 2：clientSign = urlencode(base64(sha1("nonce=" + nonce [+ "&" + ssecurity])))
-//         从 Set-Cookie 里取 serviceToken
+//
+//	从 Set-Cookie 里取 serviceToken
 func exchangeServiceToken(sid string, c mimoCred) (*ssoResult, error) {
 	if c.PassToken == "" || c.UserID == "" {
 		return nil, fmt.Errorf("缺少 pass_token / user_id，无法续期")
@@ -187,7 +188,7 @@ func exchangeServiceToken(sid string, c mimoCred) (*ssoResult, error) {
 	if !strings.Contains(loc, "?") {
 		sep = "?"
 	}
-	body2, setCookies, err := ssoGetWithCookies(loc+sep+"clientSign="+clientSign)
+	body2, setCookies, err := ssoGetWithCookies(loc + sep + "clientSign=" + clientSign)
 	if err != nil {
 		return nil, fmt.Errorf("阶段2 请求失败: %w", err)
 	}
@@ -249,13 +250,25 @@ func deriveAuthID(c mimoCred) string {
 	return providerKey
 }
 
+// authFileName —— 每账号一个 auth 文件：mimo-<userId>.json。
+// 历史版本写死单文件 mimo.json，导致第二个账号登录直接顶替第一个
+// （面板 auth-files/quota 按文件名一卡，两个宿主条目同名只剩一张卡）。
+// 现在：同一账号重登/续期覆盖同名文件（正确语义），不同账号并存互不顶替。
+// userId 缺失的极端情况退回历史单文件名。
+func authFileName(userID string) string {
+	if userID == "" {
+		return providerKey + ".json"
+	}
+	return providerKey + "-" + userID + ".json"
+}
+
 func authData(c mimoCred, fileName, id string, next time.Time) map[string]any {
 	storage, _ := json.Marshal(c)
 	if id == "" {
 		id = deriveAuthID(c)
 	}
 	if fileName == "" {
-		fileName = providerKey + ".json"
+		fileName = authFileName(c.UserID)
 	}
 	// label 带上剩余用量：宿主 auth-files 列表与面板列表页直接渲染 label，
 	// 这是官方面板上插件 provider 唯一「不用点开详情」就能看到用量的位置。
@@ -340,10 +353,10 @@ func handleAuthParse(req []byte) []byte {
 
 func handleAuthRefresh(req []byte) []byte {
 	var in struct {
-		AuthID      string          `json:"AuthID"`
-		AuthProvider string         `json:"AuthProvider"`
-		StorageJSON []byte          `json:"StorageJSON"`
-		Metadata    json.RawMessage `json:"Metadata"`
+		AuthID       string          `json:"AuthID"`
+		AuthProvider string          `json:"AuthProvider"`
+		StorageJSON  []byte          `json:"StorageJSON"`
+		Metadata     json.RawMessage `json:"Metadata"`
 	}
 	if err := json.Unmarshal(req, &in); err != nil {
 		return errResult("invalid_request", "auth.refresh 请求无法解析: "+err.Error(), 400)

@@ -29,18 +29,18 @@ const upstreamTimeout = 300 * time.Second
 var nonChatName = regexp.MustCompile(`(?i)tts|asr|seedream|image|voiceclone|voicedesign|embedding|rerank`)
 
 type execRequest struct {
-	AuthID         string              `json:"AuthID"`
-	AuthProvider   string              `json:"AuthProvider"`
-	Model          string              `json:"Model"`
-	Format         string              `json:"Format"`
-	Stream         bool                `json:"Stream"`
-	SourceFormat   string              `json:"SourceFormat"`
-	Payload        []byte              `json:"Payload"`
-	OriginalRequest []byte             `json:"OriginalRequest"`
-	StorageJSON    []byte              `json:"StorageJSON"`
-	Headers        map[string][]string `json:"Headers"`
-	StreamID       string              `json:"stream_id"`
-	HostCallbackID string              `json:"host_callback_id"`
+	AuthID          string              `json:"AuthID"`
+	AuthProvider    string              `json:"AuthProvider"`
+	Model           string              `json:"Model"`
+	Format          string              `json:"Format"`
+	Stream          bool                `json:"Stream"`
+	SourceFormat    string              `json:"SourceFormat"`
+	Payload         []byte              `json:"Payload"`
+	OriginalRequest []byte              `json:"OriginalRequest"`
+	StorageJSON     []byte              `json:"StorageJSON"`
+	Headers         map[string][]string `json:"Headers"`
+	StreamID        string              `json:"stream_id"`
+	HostCallbackID  string              `json:"host_callback_id"`
 }
 
 func (r execRequest) cred() (mimoCred, error) {

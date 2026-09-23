@@ -15,6 +15,7 @@
  *   POST /v1/images/generations    图像（Doubao-Seedream-5.0-pro）
  *   GET  /v1/models                上游目录 + 能力标注
  *   GET  /v1/models/{id}           单个模型
+ *   GET  /usage                    账号使用量查询（上游 /api/user/usage）
  *   GET  /__xm2api                 自检（也响应 / 与 /health）
  *
  * 兼容层：请求体里出现非标准 `web_search` 键时翻译成 tools 声明，其余请求逐字节透传。
@@ -103,8 +104,8 @@ let modelsCache = { at: 0, list: null, error: null };
 
 /** 兜底清单：上游取不到时用它，保证 /v1/models 不会失败 */
 const FALLBACK_MODELS = [
-  { modelName: "mimo-x-pro-preview", modelType: "TEXT", vendorName: "Mify" },
-  { modelName: "mimo-x-flash-preview", modelType: "TEXT", vendorName: "Mify" },
+  { modelName: "mimo-v2.6-pro", modelType: "TEXT", vendorName: "Mify" },
+  { modelName: "mimo-v2.6-flash", modelType: "TEXT", vendorName: "Mify" },
 ];
 
 /**
@@ -287,6 +288,7 @@ const SUPPORTED = [
   "POST /api/*                    直通上游 mimo-server",
   "GET  /v1/models                模型清单（含 capabilities / price）",
   "GET  /v1/models/{id}           单个模型",
+  "GET  /usage                    账号使用量查询（上游 /api/user/usage）",
   "GET  /__xm2api                 自检",
 ];
 
@@ -409,6 +411,50 @@ const routeServer = createRouteServer({
         sendJson(res, 200, found);
       },
     },
+    {
+      // 账号使用量查询：上游 /api/user/usage（Cookie 鉴权），响应原样透传
+      method: "GET",
+      path: /^\/(v1\/)?usage$/,
+      handler: async (req, res) => {
+        const cookie = readSession()?.routeCookieHeader;
+        if (!cookie) {
+          sendJson(res, 401, {
+            error: {
+              message: "没有 SSO 会话凭证，无法查询使用量",
+              type: "auth_error",
+              code: "no_credentials",
+            },
+            fix: "npm run refresh",
+          });
+          return;
+        }
+        try {
+          const r = await fetch(`${MIMO_SERVER}/api/user/usage`, {
+            headers: { cookie, accept: "application/json" },
+            signal: AbortSignal.timeout(config.server.upstreamTimeoutMs || 60000),
+          });
+          const text = await r.text();
+          let body;
+          try {
+            body = JSON.parse(text);
+          } catch {
+            body = { raw: text };
+          }
+          if (!r.ok) {
+            sendJson(res, r.status, {
+              error: { message: `上游 /api/user/usage 返回 HTTP ${r.status}`, type: "upstream_error" },
+              upstream: body,
+            });
+            return;
+          }
+          sendJson(res, 200, body);
+        } catch (e) {
+          sendJson(res, 502, {
+            error: { message: `查询使用量失败：${e.message || e}`, type: "upstream_error" },
+          });
+        }
+      },
+    },
   ],
   meta: () => {
     const session = readSession();
@@ -456,6 +502,7 @@ const routeServer = createRouteServer({
         `OpenAI base_url:   http://127.0.0.1:${PORT}/v1   (api_key 可填任意字符串)`,
         `Legacy path:       http://127.0.0.1:${PORT}/route/chat/completions`,
         `Meta:              http://127.0.0.1:${PORT}/__xm2api`,
+        `使用量:            GET http://127.0.0.1:${PORT}/usage（账号剩余用量）`,
         `联网搜索:          请求体加 "web_search": true，或 tools:[{type:"web_search"}]`,
         `推理等级:          上游不支持（reasoning_effort 实测无效），客户端无需设置；思考内容照常返回`,
         `工具调用:          tools + tool_choice，用法与 OpenAI 一致`,

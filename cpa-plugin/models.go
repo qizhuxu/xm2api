@@ -27,11 +27,11 @@ type upstreamModel struct {
 	Billable     any    `json:"billable"`
 	DisplayRatio any    `json:"displayRatio"`
 	Ratio        *struct {
-		InputPricePerM       *float64 `json:"inputPricePerM"`
-		OutputPricePerM      *float64 `json:"outputPricePerM"`
-		CachedPricePerM      *float64 `json:"cachedPricePerM"`
+		InputPricePerM        *float64 `json:"inputPricePerM"`
+		OutputPricePerM       *float64 `json:"outputPricePerM"`
+		CachedPricePerM       *float64 `json:"cachedPricePerM"`
 		ImageResolutionPrices []struct {
-			Tier         string  `json:"tier"`
+			Tier          string  `json:"tier"`
 			PricePerImage float64 `json:"pricePerImage"`
 		} `json:"imageResolutionPrices"`
 	} `json:"ratio"`
@@ -55,9 +55,10 @@ type modelInfo struct {
 
 // 兜底清单：上游取不到时至少保证 /v1/models 不空。
 // 只放实测确认过的两个文本模型，不猜。
+// （2026-09 上游把 mimo-x-{pro,flash}-preview 改名为 mimo-v2.6-{pro,flash}，旧名已下线）
 var fallbackModels = []upstreamModel{
-	{ModelName: "mimo-x-pro-preview", ModelType: "TEXT", VendorName: "Mify"},
-	{ModelName: "mimo-x-flash-preview", ModelType: "TEXT", VendorName: "Mify"},
+	{ModelName: "mimo-v2.6-pro", ModelType: "TEXT", VendorName: "Mify"},
+	{ModelName: "mimo-v2.6-flash", ModelType: "TEXT", VendorName: "Mify"},
 }
 
 // 按 modelType 标注能力。与 xm2api 的 TYPE_CAPS 对齐，都是逐项实测过的。

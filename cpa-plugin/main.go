@@ -4,9 +4,10 @@
 // SSO 凭证、模型发现、请求执行全部在 CPA 进程内完成。
 //
 // 声明了三个能力：
-//   auth_provider   —— 解析 mimo.json 凭证，并用 passToken 做两阶段 SSO 换 serviceToken
-//   model_provider  —— 从上游 /api/model/list 动态发现模型
-//   executor        —— 把 chat/completions 转发到 /api/route/chat/completions（含真流式）
+//
+//	auth_provider   —— 解析 mimo.json 凭证，并用 passToken 做两阶段 SSO 换 serviceToken
+//	model_provider  —— 从上游 /api/model/list 动态发现模型
+//	executor        —— 把 chat/completions 转发到 /api/route/chat/completions（含真流式）
 //
 // 注意 CPA 的硬性约束：插件 executor 必须有一条同 provider key 的 auth 记录，
 // 所以 auth_provider 是必需的，不是可选项。
@@ -49,12 +50,13 @@ var pluginRepo = "https://github.com/your-org/xm2api"
 // cfg 是 plugins.configs.mimo 下的插件自有配置。宿主只解析 enabled/priority，
 // 其余字段原样透传，所以这里全部可选、都有默认值。
 type cfg struct {
-	BaseURL       string   `yaml:"base_url"`
-	SID           string   `yaml:"sid"`
-	WebSearchAuto bool     `yaml:"web_search_auto"`
-	RefreshAfter  string   `yaml:"refresh_after"`
-	ModelTTL      string   `yaml:"model_ttl"`
-	ExcludeModels []string `yaml:"exclude_models"`
+	BaseURL       string      `yaml:"base_url"`
+	SID           string      `yaml:"sid"`
+	WebSearchAuto bool        `yaml:"web_search_auto"`
+	RefreshAfter  string      `yaml:"refresh_after"`
+	ModelTTL      string      `yaml:"model_ttl"`
+	ExcludeModels []string    `yaml:"exclude_models"`
+	OTPAutoMail   *otpMailCfg `yaml:"otp_auto_mail"`
 }
 
 func defaultCfg() cfg {
@@ -345,10 +347,10 @@ func handleRegister(req []byte) []byte {
 			},
 		},
 		"capabilities": map[string]any{
-			"auth_provider": true,
-			"model_provider":          true,
-			"executor":                true,
-			"executor_model_scope":    "both",
+			"auth_provider":        true,
+			"model_provider":       true,
+			"executor":             true,
+			"executor_model_scope": "both",
 			// "openai-image" 是 CPA 内部图像执行的格式串：declared 包含它，
 			// /v1/images/* 的请求 payload 才会直通插件 executor（见 README §图像生成）。
 			"executor_input_formats":  []string{"chat-completions", "openai-image"},

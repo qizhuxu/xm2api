@@ -28,8 +28,8 @@ import (
 type credState struct {
 	AuthID      string
 	UserID      string
-	CanRenew    bool      // 有 pass_token 才能续期
-	HasToken    bool      // 当前是否持有 service_token
+	CanRenew    bool // 有 pass_token 才能续期
+	HasToken    bool // 当前是否持有 service_token
 	TokenLen    int
 	ObtainedAt  time.Time // 最近一次成功换取 serviceToken 的时间
 	LastTryAt   time.Time // 最近一次尝试续期的时间
@@ -39,7 +39,7 @@ type credState struct {
 	Reactive    int       // 其中由上游 401 触发的次数
 	LastIssued  string    // 这次 token 是怎么来的
 
-	tok  string    // 绝不出结构体、绝不进日志、绝不进管理页
+	tok  string   // 绝不出结构体、绝不进日志、绝不进管理页
 	full mimoCred // 完整凭证（含 pass_token）：quota.fetch 等宿主不带 StorageJSON
 	// 的调用要用。未导出字段，encoding/json 不会序列化它，管理页/状态页拿不到。
 }

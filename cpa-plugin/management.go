@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -98,6 +99,26 @@ func handleManagement(req []byte) []byte {
 		if in.Method == http.MethodPost {
 			return wrapResourcePassword(in.Body, id)
 		}
+		// GET + op=password|verify：免管理密钥的提交通道。宿主资源路由只转发
+		// GET（POST 404 空体，实测 v7.3.9），页面提交只能走 GET；payload 放
+		// x-mimo-req 头（base64 JSON），密码不进 URL、不进宿主访问日志。
+		// 只打 header 键名（req= 若在 query 绝不 dump，防止密码进日志）。
+		if v := in.Query["op"]; len(v) > 0 && strings.TrimSpace(v[0]) != "" {
+			hk := make([]string, 0, len(in.Header))
+			for k := range in.Header {
+				hk = append(hk, k)
+			}
+			dbg("resource GET op=%s header-keys=%v", strings.TrimSpace(v[0]), hk)
+			raw := decodeMimoReq(in.Header, in.Query)
+			switch strings.TrimSpace(v[0]) {
+			case "password":
+				return wrapManagementHTTP(handleLoginPassword(raw))
+			case "verify":
+				return wrapManagementHTTP(handleLoginVerify(raw))
+			default:
+				return resourceJSON(400, `{"error":"unknown op"}`)
+			}
+		}
 		s := getQRSession(id)
 		if v := in.Query["poll"]; len(v) > 0 && strings.TrimSpace(v[0]) != "" {
 			if s == nil {
@@ -156,6 +177,31 @@ func resourceJSON(status int, body string) []byte {
 		"Headers":    http.Header{"content-type": []string{"application/json"}},
 		"Body":       []byte(body),
 	})
+}
+
+// decodeMimoReq 解出免密钥提交通道的 payload：优先 x-mimo-req 头（base64 JSON），
+// 兜底 req= query（万一宿主将来剥自定义头）。密码只在返回的字节里，绝不打印。
+func decodeMimoReq(h map[string][]string, q map[string][]string) []byte {
+	enc := ""
+	for k, v := range h {
+		if strings.EqualFold(k, "x-mimo-req") && len(v) > 0 {
+			enc = strings.TrimSpace(v[0])
+			break
+		}
+	}
+	if enc == "" {
+		if v := q["req"]; len(v) > 0 {
+			enc = strings.TrimSpace(v[0])
+		}
+	}
+	if enc == "" {
+		return []byte("{}")
+	}
+	raw, err := base64.StdEncoding.DecodeString(enc)
+	if err != nil {
+		return []byte("{}")
+	}
+	return raw
 }
 
 // wrapResourcePassword 处理登录页密码表单的 POST：

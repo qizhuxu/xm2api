@@ -114,6 +114,20 @@ api-keys:
 
 > `pass_token` 等同账号密码，别提交到仓库；传输只走 scp/sftp。
 
+### 2.4.1 多账号并存（每账号一个 auth 文件）
+
+登录产出的凭证写 **`mimo-<userId>.json`**（如 `mimo-1000000002.json`）：
+
+- **不同账号并存互不顶替** —— 面板 `#/auth-files` 与 `#/quota` 每个账号一张卡；
+- **同一账号重登/续期**覆盖同名文件（正确语义），`auth.refresh` 的续期落盘也回到各自文件；
+- `userId` 缺失的极端情况退回历史单文件名 `mimo.json`；
+- 多凭证在宿主侧是一个**凭证池**：请求失败自动换号重试并冷却坏号（`PATCH /v0/management/auth-files/status` 可手动禁用/启用，上游报「未开通会员/到期」的废号建议禁用）；
+- `GET /v0/management/auth-files/download?name=<file>` 可随时导出凭证备份；`POST /v0/management/auth-files`（multipart `file`，存储名=上传文件名）可导入。
+
+**宿主条目双条目现象（已知、宿主固有）：** `host.auth.save` 注册的条目 id 为去扩展名（`mimo-<uid>`，带用量 label），auth 目录 watcher 扫描注册的条目 id 为完整文件名（`mimo-<uid>.json`，label 为裸 `mimo`）—— 同一文件在 `GET /v0/management/auth-files` 里可能出现两条，重启不收敛。用量快照写回文件（触发 watcher）后尤其容易出现。**面板 quota 补丁（v7）按文件名归并去重、同名保留带用量 label 的条目**，`#/quota` 每账号一卡、`#/auth-files` 卡内额度区按卡内文件名精确匹配各自的 `auth_index`（不再 fallback 到第一个凭证，杜绝多账号余量串卡）。
+
+> 历史版本写死单文件 `mimo.json`，第二个账号登录会顶替第一个（且面板按文件名一卡，多个宿主条目同名只剩一张卡）。升级后旧文件可不动（继续生效），也可在面板删除后重新登录获得规范命名。
+
 ### 2.5 凭证是怎么被处理的
 
 这一节值得单独看 —— 里面每个决定都是实测出来的，不是设计猜想。
@@ -443,17 +457,28 @@ CPA 升级后需重验。不想用图像时依旧可用 `exclude_models: ["Douba
      `mimo (用户) · 剩余 80% · 2026-09-23 重置` 写进文件并刷新宿主内存记录，
      **面板 auth-files 列表每行直接可见**（实测生效）；详情 INFO 视图另有
      `usage_snapshot` 全量快照。CPA 重启后插件从文件快照自愈（`restoreUsageFromRaw`）。
-  2. **#/quota 页 + auth-files 卡片（面板补丁 v5）**：
+  2. **#/quota 页 + auth-files 卡片（面板补丁 v6）**：
      `cpa-plugin/panel-patch/mimo-quota-patch.html` 注入 `static/management.html` 的
-     **`<head>` 之后**（hook 必须先于面板 bundle 执行）。用 Playwright 实测面板真实 DOM 后，
-     把卡片放到与内置 provider 一致的两处位置：
+     **`<head>` 之后**（hook 必须先于面板 bundle 执行；**升级补丁时先从
+     `management.html.orig` 恢复干净原版再注入，勿叠加**）。研究面板 bundle
+     （2.7MB 内联 SPA）后，v6 修复了 v5 用户实测的四个问题：
      - `#/quota`：卡片进入 provider 卡片网格 `QuotaPage-module__grid___veEj-`，与 antigravity
-       卡片并列（`placeCard()` 幂等校正父节点 + MutationObserver + 2s 兜底轮询，React 渲染完成后
-       自动归位；`lastHtml` 缓存保证卡片被 React 重建后不会变成空卡）；
-     - `#/auth-files`：给 mimo 卡片在 `footer.actions` 之前注入与 antigravity 同结构的
-       `AuthFileQuota-module__quotaSection`（class 名**动态取自面板当前真实节点**，面板升级换
-       hash 后缀也不失效），点击「刷新额度」就地渲染剩余量（实测 `剩余 78.0% · MiMo 用量周期 ·
-       至 2026-09-23 · 重置 ...`）。
+       卡片并列。**防闪烁**：MutationObserver 无条件幂等重建 + `lastHtml` 缓存恢复（v5 的
+       observer 条件含 `contains(card)`，React 丢弃外来节点后要等 2s 轮询才重建，出现可见
+       空窗）；60s 自动刷新静默化（数据不变不动 DOM，仅手动点击显示加载反馈）；
+     - `#/auth-files`：给 mimo 卡片在 `footer.actions` 之前注入官方
+       `AuthFileQuota-module__quotaSection`，**逐字复刻 antigravity 的 DOM/CSS 语汇**：
+       idle 按钮 `class="quotaMessage quotaMessageAction"` 双 class（bundle CSS 选择器为
+       `button.…quotaMessageAction`；v5 在 antigravity 节点不在场时 fallback 成空 class，
+       原生 button 在 flex column 里被拉成通栏灰底黑框）；数据态复刻官方 VO/SO 组件：
+       `quotaPercent`「剩余 X%」/「额度可用」+ `quotaReset`「X 天 Y 小时 后刷新」（≤24h 标
+       soon）+ `quotaBar>quotaBarFill`（阈值 ≥70 绿 / ≥30 中 / <30 红，与 bundle `SO` 组件
+       一致）。class map 从 bundle 提取内置、live DOM 优先覆盖自愈；i18n 文案与 bundle zh
+       资源逐字对齐；
+     - **插件禁用联动**：查 `GET /v0/management/plugins` 的 `plugins[].effective_enabled`，
+       禁用/移除 mimo 插件时自动清除两处卡片（30s 缓存；查询失败 fail-open 用上次值）；
+     - **登录页不渲染**：QuotaPage grid 不存在或检测到 `LoginPage-module__` 登录页 DOM 时
+       一律不渲染（v5 的 body/main fallback 会把卡片插到登录页顶部）。
      数据：`GET /v0/management/plugins/mimo/quota?auth_index=`（插件 quota_provider 标准端点，
      normalized `{subscription,summary,groups}`，实测返回 78.2%），失败回退
      `POST /v0/management/quota/fetch`。
@@ -463,6 +488,7 @@ CPA 升级后需重验。不想用图像时依旧可用 `exclude_models: ["Douba
      （否则 updater 按 GitHub digest 覆写本地面板，实测源码
      `managementasset/updater.go:117,280`）。
      补丁应用步骤见该文件头注释（Linux/Windows 通用，插入后硬刷新面板即可，无需重启 CPA）。
+     验证脚本：`mimo_calw/scripts/panel-quota-probe3.mjs`（P1–P4 四组断言 + 65s 闪烁采样）。
   其余实时位置：`POST /v0/management/quota/fetch`（curl/脚本）与
   `GET /v0/management/plugins/mimo/status`（状态 JSON `usage` 字段）。
 

@@ -5,6 +5,7 @@ jiu/
 data/
 !data/.gitkeep
 logs/
+backups/
 
 # 通用
 node_modules/
