@@ -475,8 +475,20 @@ CPA 升级后需重验。不想用图像时依旧可用 `exclude_models: ["Douba
        soon）+ `quotaBar>quotaBarFill`（阈值 ≥70 绿 / ≥30 中 / <30 红，与 bundle `SO` 组件
        一致）。class map 从 bundle 提取内置、live DOM 优先覆盖自愈；i18n 文案与 bundle zh
        资源逐字对齐；
-     - **插件禁用联动**：查 `GET /v0/management/plugins` 的 `plugins[].effective_enabled`，
-       禁用/移除 mimo 插件时自动清除两处卡片（30s 缓存；查询失败 fail-open 用上次值）；
+     - **插件禁用联动（v7.5 起即时）**：门闸读 `plugins[].effective_enabled/registered`。
+       v7.5 之前只管自己的 TTL 轮询，按完开关要等最多 30s（用户体感＝「必须刷新页面」）；
+       而且**只在 `window.fetch` 挂钩是无效的**——面板 API 客户端是 axios，走
+       `XMLHttpRequest`，开关请求根本不经过 fetch（v7.5 实测：只钩 fetch 时禁用插件毫无
+       反应）。现在 fetch 与 XHR 两侧都判 `/v0/management/plugins` 的写请求
+       （`PATCH …/<id>/enabled`，直接读 body 的 `enabled`）与 GET 响应（fetch 用
+       `clone()`、XHR 用 `load`+`responseText`），另加「插件管理页 mimo 行 ToggleSwitch
+       被点击」的 DOM 兜底；TTL 降到 10s 仅作兜底。实测点侧边栏导航、**不刷新页面**：
+       禁用后 `#/quota` 卡片清空、`#/auth-files` 两卡隐藏，重新启用后数据卡 ~1.3s 回来；
+     - **禁用时整卡隐藏（v7.5）**：宿主不会摘掉 mimo 的 auth 文件——禁用后
+       `GET /v0/management/auth-files` 里仍是 `status=active / unavailable=false`，
+       只有 `supports_quota`、`quota_provider` 两个字段消失，官方面板照常渲染成
+       「一切正常」的卡片。故禁用期间由补丁给 mimo 卡片打 `data-mq-hidden="1"`
+       （配套 CSS `display:none !important`），启用后摘标记恢复，不销毁节点；
      - **登录页不渲染**：QuotaPage grid 不存在或检测到 `LoginPage-module__` 登录页 DOM 时
        一律不渲染（v5 的 body/main fallback 会把卡片插到登录页顶部）。
      数据：`GET /v0/management/plugins/mimo/quota?auth_index=`（插件 quota_provider 标准端点，
@@ -484,11 +496,22 @@ CPA 升级后需重验。不想用图像时依旧可用 `exclude_models: ["Douba
      `POST /v0/management/quota/fetch`。
      **密钥零配置**：patch 在 `<head>` 安装 fetch/XHR hook，捕获面板自身请求的
      `Authorization: Bearer <key>`（实测捕获成功），不再依赖登录时勾选「记住密码」或控制台注入。
+     **自检**：控制台 `window.__mimoQuotaState()` 返回门闸值/卡片数/隐藏卡数（只读、无凭证）。
+     **⚠️ 注入必须走脚本**：`node cpa-plugin/panel-patch/apply-patch.mjs [--bin <CPA bin>]`
+     （默认 `%TEMP%\cpa-test\bin`；`--dry-run` 只校验）。它做三件事：从
+     `management.html.orig` 还原干净原版（勿叠加）、注入前用 `node:vm` 解析内联脚本
+     **语法不过就不写盘**、把上一版备份到 `.prev`。
+     **v7.4.1 的教训**：版本标记写成 `window.__mimoQuotaPatch=7.4.1`（`7.4.1` 不是合法
+     数字字面量）⇒ 整个 `<script>` 解析失败、补丁一行没跑，现象正是用户报的
+     「`#/quota` 两张卡消失 + 卡片里『点击此处刷新额度』按钮没了」，控制台只有
+     `Unexpected number`；手写 python 注入没有任何校验，所以静默炸了。
+     另：官方面板自己的内联脚本是 ES module（含 `import.meta`），**别**用 `vm.Script`
+     校验整份 `management.html`，只校验补丁那一段。
      **前置**：config `remote-management.disable-auto-update-panel: true`
      （否则 updater 按 GitHub digest 覆写本地面板，实测源码
      `managementasset/updater.go:117,280`）。
-     补丁应用步骤见该文件头注释（Linux/Windows 通用，插入后硬刷新面板即可，无需重启 CPA）。
-     验证脚本：`mimo_calw/scripts/panel-quota-probe3.mjs`（P1–P4 四组断言 + 65s 闪烁采样）。
+     验证脚本：`mimo_calw/scripts/panel-v75-verify.mjs`（上述三个问题逐条断言，
+     含「不刷新页面」的开关联动）与 `mimo_calw/scripts/panel-quota-probe3.mjs`。
   其余实时位置：`POST /v0/management/quota/fetch`（curl/脚本）与
   `GET /v0/management/plugins/mimo/status`（状态 JSON `usage` 字段）。
 

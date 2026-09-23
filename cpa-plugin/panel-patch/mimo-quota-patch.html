@@ -1,6 +1,40 @@
 <!--
-  MiMo quota patch for CLIProxyAPI Management Center (v7.3.9 官方面板) — v7.4.1
+  MiMo quota patch for CLIProxyAPI Management Center (v7.3.9 官方面板) — v7.5
   ------------------------------------------------------------------
+  v7.5（开关联动即时化 + 禁用时整卡隐藏；修 v7.4.1 的致命语法错误）：
+  R11 补丁整个不执行（用户实测：#/quota 两张 mimo 卡消失、
+      #/auth-files 卡片里「点击此处刷新额度」按钮没了、控制台
+      「Unexpected number」）：
+      根因：v7.4.1 把版本标记写成 `window.__mimoQuotaPatch=7.4.1` ——
+      `7.4.1` 不是合法数字字面量（`7.4` 后面跟 `.1`），整个 <script> 解析
+      失败 ⇒ 补丁一行都没跑（window.__mimoQuotaPatch 为 undefined、连密钥
+      捕获 hook 都没装上）。修复：写成字符串 '7.5'；并把「注入后必须对内联
+      脚本做语法校验」固化进 apply-patch.mjs（vm.Script 解析，不执行）。
+  R12 插件禁用/启用后必须刷新页面才更新（用户实测）：
+      根因：门闸 pluginEnabled() 只靠 30s TTL 缓存 + 自身定时轮询，面板上的
+      开关动作与补丁没有任何通信 ⇒ 禁用后最多晚 30s 才 purge、启用后同理。
+      排查记录：v7.5 第一版只在 window.fetch 上挂钩，实测**完全没反应** ——
+      面板的 API 客户端是 axios，走的是 XMLHttpRequest（bundle 里能看到
+      axios 的 _request/拦截器），开关请求根本不经过 fetch。所以两套都挂：
+        a) fetch 与 XHR 两侧都判 /v0/management/plugins 的写请求
+           （PATCH /v0/management/plugins/<id>/enabled）⇒ 立刻按请求体里的
+           enabled 布尔值更新缓存（面板的意图是权威的），禁用时马上 purge，
+           启用时马上重建；
+        b) 两侧的 GET 响应（fetch 用 clone、XHR 用 load+responseText）解析后
+           同步进缓存 ⇒ 面板自己拉到的权威状态就是我们的状态；
+        c) DOM 兜底：插件管理页 mimo 行里的 ToggleSwitch 被点击时也触发重查
+           （将来面板换通道也不至于失联）；
+        d) TTL 30s → 10s，并把 2s 巡检保持为兜底。
+      实测（点击侧边栏导航，不刷新页面）：禁用后 #/quota 卡片清空、
+      #/auth-files 两卡隐藏；重新启用后两张数据卡 1.3s 内回来。
+  R13 禁用插件后 #/auth-files 的两张 mimo 卡片还在（用户实测）：
+      根因（后端实测）：禁用插件后宿主**仍然**把 mimo 的 auth 文件列在
+      /v0/management/auth-files（status=active、unavailable=false，只有
+      supports_quota/quota_provider 字段消失）⇒ 官方面板照常渲染卡片，
+      看起来一切正常，实际上这些凭证一个都用不了。
+      修复：禁用期间给 mimo 卡片打 data-mq-hidden="1"（配套 CSS
+      display:none!important），启用后摘掉标记恢复原样；每轮 renderPass
+      重新施加，React 重建卡片也不会漏。
   v7.4.1（卡片入场 stagger 归零）：
   R10 #/auth-files 卡片「一个一个加载、mimo 明显慢于 Antigravity」：
       实测（panel-auth-appear.mjs 带/不带补丁逐帧对照）是官方 CSS 入场
@@ -130,19 +164,15 @@
   上游展望：官方面板若为 supports_quota=true 的插件条目做通用 adapter，
   本补丁即可退场。
 
-  应用方法（Linux/Windows 通用）：
+  应用方法（Linux/Windows 通用，**必须走脚本**，别手写 python 注入了）：
     1. config.yaml：remote-management.disable-auto-update-panel: true
-    2. 从干净官方 management.html 重新注入本补丁（勿在旧补丁上叠加）：
-         cp management.html.orig management.html   # 或重新下载官方面板
-         python3 - <<'EOF'
-         import re
-         p='static/management.html'; patch=open('mimo-quota-patch.html',encoding='utf-8').read()
-         html=open(p,encoding='utf-8').read()
-         assert patch.strip() not in html
-         html,n=re.subn(r'(<head[^>]*>)',lambda m:m.group(1)+'\n'+patch,html,count=1)
-         assert n==1
-         open(p,'w',encoding='utf-8').write(html)
-         EOF
+    2. node apply-patch.mjs --bin <CPA bin 目录>       # 本目录下，零依赖
+         - 从 static/management.html.orig 还原干净原版（勿在旧补丁上叠加）
+         - 在第一个 <head> 之后注入本文件
+         - 注入前用 vm.Script 解析内联 <script>：语法错就直接中止并保留原文件
+           （v7.4.1 的 `__mimoQuotaPatch=7.4.1` 就是这么静默炸掉的）
+         - 自动备份上一版到 static/management.html.prev
+      默认 bin 目录：%TEMP%\cpa-test\bin（可用 --bin 覆盖；--dry-run 只校验）
     3. 硬刷新面板页面（Ctrl+F5；静态文件，无需重启 CPA）。
 -->
 <style>
@@ -150,6 +180,10 @@
    后面的卡「一个一个」慢慢浮现（DOM 早就好了，只是动画没轮到）。归零
    animation-delay，所有卡与第一张（Antigravity）同时入场；淡入本身保留。 */
 article[class*="AuthFileCard-module__card"]{animation-delay:0s !important}
+/* v7.5：插件禁用期间整卡隐藏（宿主仍会把这些 auth 文件列出来，见 R13）。
+   用属性选择器而不是 inline style —— React 重建卡片时不会带上我们的 inline，
+   但我们的每轮 renderPass 会重新打标记，属性+CSS 让中间态也不会“闪一下”。 */
+article[data-mq-hidden="1"]{display:none !important}
 .mq-card{padding:14px 16px;border:1px solid rgba(128,128,128,.35);border-radius:10px;
   font:13px/1.6 system-ui,-apple-system,sans-serif;background:rgba(128,128,128,.06);margin:0 0 12px}
 .mq-card h3{margin:0 0 8px;font-size:14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
@@ -158,9 +192,9 @@ article[class*="AuthFileCard-module__card"]{animation-delay:0s !important}
 .mq-card .mq-meta{color:#666;font-size:12px;margin:2px 0 6px}
 </style>
 <script>
-/* MiMo quota patch v7.4 — 见文件头注释。密钥只驻留内存变量，不落盘、不外发。 */
+/* MiMo quota patch v7.5 — 见文件头注释。密钥只驻留内存变量，不落盘、不外发。 */
 (function(){
-  if(window.__mimoQuotaPatch) return; window.__mimoQuotaPatch=7.4.1;
+  if(window.__mimoQuotaPatch) return; window.__mimoQuotaPatch='7.5';
 
   /* ================= 1. 会话密钥自动捕获（先于面板 bundle 执行） ================= */
   var KEY_EVT='mimo-key-captured';
@@ -178,9 +212,16 @@ article[class*="AuthFileCard-module__card"]{animation-delay:0s !important}
   try{
     var of=window.fetch;
     if(of){
-      window.fetch=function(){
+      window.fetch=function(req,init){
+        /* 面板自己的插件开关动作与插件列表响应一并利用（R12）：
+           PATCH /v0/management/plugins/<id>/enabled 是权威意图，直接按它更新
+           门闸缓存；GET 的 plugins 响应 clone 出来同步（别的页面/客户端改的
+           开关也能跟上）。这里只读不改，原请求原样发出。 */
+        var url='', method='GET';
         try{
-          var h=(arguments[1]&&arguments[1].headers)||null;
+          url=String((req&&req.url)||req||'');
+          method=String((init&&init.method)||(req&&req.method)||'GET').toUpperCase();
+          var h=(init&&init.headers)||null;
           if(h){
             var auth=null;
             if(typeof h.get==='function') auth=h.get('Authorization');
@@ -188,19 +229,71 @@ article[class*="AuthFileCard-module__card"]{animation-delay:0s !important}
             else if(Object.prototype.hasOwnProperty.call(h,'authorization')) auth=h.authorization;
             if(auth) capture(auth);
           }
+          var isPlugins=/\/v0\/management\/plugins(\/|\?|$)/.test(url);
+          if(isPlugins && method!=='GET') onPluginToggle(method,url,(init&&init.body)||null);
+          if(isPlugins && method==='GET') lastPluginsFetch=Date.now();
         }catch(e){}
-        return of.apply(this,arguments);
+        var p=of.apply(this,arguments);
+        try{
+          if(method==='GET' && /\/v0\/management\/plugins(\/|\?|$)/.test(url) && p && typeof p.then==='function'){
+            p.then(function(resp){
+              try{
+                if(resp && resp.ok && resp.clone){
+                  resp.clone().json().then(syncFromPluginList).catch(function(){});
+                }
+              }catch(e){}
+            }).catch(function(){});
+          }
+        }catch(e){}
+        return p;
       };
     }
   }catch(e){}
   try{
-    var oxh=XMLHttpRequest.prototype.open, osr=XMLHttpRequest.prototype.setRequestHeader;
-    XMLHttpRequest.prototype.open=function(){ return oxh.apply(this,arguments); };
+    /* 面板的 API 客户端是 axios ⇒ 走 XHR（v7.5 实测：只在 fetch 上挂钩，
+       开关动作完全看不到）。这里补 XHR 侧：open 记请求行、send 时判定
+       /v0/management/plugins 的写请求（开关）与读响应（列表同步）。 */
+    var oxh=XMLHttpRequest.prototype.open, osr=XMLHttpRequest.prototype.setRequestHeader,
+        oxs=XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open=function(m,u){
+      try{ this.__mqMethod=String(m||'GET').toUpperCase(); this.__mqUrl=String(u||''); }catch(e){}
+      return oxh.apply(this,arguments);
+    };
     XMLHttpRequest.prototype.setRequestHeader=function(k,v){
       try{ if(k && String(k).toLowerCase()==='authorization') capture(v); }catch(e){}
       return osr.apply(this,arguments);
     };
+    XMLHttpRequest.prototype.send=function(body){
+      try{
+        var u=this.__mqUrl||'', m=this.__mqMethod||'GET';
+        if(/\/v0\/management\/plugins(\/|\?|$)/.test(u)){
+          if(m!=='GET') onPluginToggle(m,u,(typeof body==='string')?body:null);
+          else this.addEventListener('load',function(){
+            try{
+              var rt=this.responseType;
+              var t=(rt===''||rt==='text')?this.responseText:'';
+              if(t){ var j=null; try{ j=JSON.parse(t); }catch(e){} if(j) syncFromPluginList(j); }
+            }catch(e){}
+          });
+        }
+      }catch(e){}
+      return oxs.apply(this,arguments);
+    };
   }catch(e){}
+  /* 双保险：万一将来面板换成 fetch 之外的通道，点插件行的开关也能触发重查。
+     只在「插件管理页的 mimo 行」里的 ToggleSwitch 上生效，不干扰别处的开关。 */
+  document.addEventListener('click',function(ev){
+    try{
+      var el=ev.target;
+      while(el && el!==document && !(el.tagName==='LABEL' && /ToggleSwitch/.test(String(el.className)))) el=el.parentElement;
+      if(!el || el===document) return;
+      var row=el.closest?el.closest('article[class*="PluginsPage-module__pluginRow"]'):null;
+      if(!row || !/mimo/i.test((row.innerText||'').slice(0,80))) return;
+      invalidateEnabled();
+      setTimeout(function(){ maybeRender(true); },300);
+      setTimeout(function(){ maybeRender(true); },1500);
+    }catch(e){}
+  },true);
 
   /* ================= 2. 基础工具 ================= */
   function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){
@@ -267,29 +360,68 @@ article[class*="AuthFileCard-module__card"]{animation-delay:0s !important}
     return out;
   }
 
-  /* ================= 3. 插件启用状态（P1） ================= */
-  var enCache={v:null,ts:0};
-  async function pluginEnabled(key){
+  /* ================= 3. 插件启用状态（P1/R12） ================= */
+  var enCache={v:null,ts:0}, lastPluginsFetch=0;
+  var EN_TTL_MS=10000; /* 30s → 10s：面板外（别的页面/客户端）改开关时恢复更快 */
+  function pluginEnabled(key){
     var now=Date.now();
-    if(enCache.v!==null && now-enCache.ts<30000) return enCache.v;
+    if(enCache.v!==null && now-enCache.ts<EN_TTL_MS) return Promise.resolve(enCache.v);
+    return fetch('/v0/management/plugins',{headers:{'Authorization':'Bearer '+key,'X-Management-Key':key}})
+      .then(function(r){
+        return r.text().then(function(t){
+          var j=null; try{ j=JSON.parse(t); }catch(e){}
+          return syncFromPluginList(j, r.ok);
+        });
+      })
+      .catch(function(){ return enCache.v===null?true:enCache.v; });
+  }
+  /* 把一份 /v0/management/plugins 响应写进缓存。返回该状态。
+     查询失败（401 用了密文 key、非 JSON、结构不符）≠ 插件禁用：
+     fail-open 沿用上次值/true —— 否则一次坏查询会让卡片被 purge。
+     ok 省略时按“结构可信”处理（hook 里 clone 出来的响应没带状态码）。 */
+  function syncFromPluginList(j,ok){
+    var now=Date.now();
+    if(ok===false || !j || !Array.isArray(j.plugins)) return enCache.v===null?true:enCache.v;
+    var hit=null;
+    for(var i=0;i<j.plugins.length;i++){ if(j.plugins[i] && j.plugins[i].id==='mimo'){ hit=j.plugins[i]; break; } }
+    var val = hit ? (hit.effective_enabled===true && hit.registered!==false) : false; /* 成功响应但没注册 ⇒ 视为不可用 */
+    var changed = enCache.v!==val;
+    enCache={v:val,ts:now};
+    if(changed){ applyGate(val); }
+    return val;
+  }
+  /* 门闸副作用：禁用 ⇒ 立刻清掉补丁画的东西（R12），启用 ⇒ 立刻重建 */
+  function applyGate(enabled){
     try{
-      var r=await fetch('/v0/management/plugins',{headers:{'Authorization':'Bearer '+key,'X-Management-Key':key}});
-      var t=await r.text(); var j=null; try{ j=JSON.parse(t); }catch(e){}
-      /* 查询失败（401 用了密文 key、非 JSON、结构不符）≠ 插件禁用：
-         fail-open 沿用上次值/true，绝不缓存 false —— 否则一次坏查询会
-         让卡片被 purge 拦截 30 秒（v6 实测 bug）。 */
-      if(!r.ok || !j || !Array.isArray(j.plugins)){
-        return enCache.v===null?true:enCache.v;
-      }
-      var arr=j.plugins, hit=null;
-      for(var i=0;i<arr.length;i++){ if(arr[i].id==='mimo'){ hit=arr[i]; break; } }
-      if(!hit){ enCache={v:false,ts:now}; return false; }   /* 成功响应但插件未注册 */
-      var ok=hit.effective_enabled===true && hit.registered!==false;
-      enCache={v:ok,ts:now};
-      return ok;
-    }catch(e){ return enCache.v===null?true:enCache.v; }
+      if(enabled){ gateAuthCards(true); maybeRender(true); }
+      else purgeAll();
+    }catch(e){}
+  }
+  /* 面板刚点了开关（v7.5 新增）：请求体里的 enabled 是权威意图，先按它走，
+     再在两轮之后 invalidate 一次，用服务端真实状态校正（PATCH 落盘是异步的）。 */
+  function onPluginToggle(method,url,body){
+    var want=null;
+    try{
+      if(typeof body==='string'){ var j=JSON.parse(body); if(j&&typeof j.enabled==='boolean') want=j.enabled; }
+    }catch(e){}
+    if(want===null){ invalidateEnabled(); }
+    else { enCache={v:want,ts:Date.now()}; applyGate(want); }
+    setTimeout(function(){ if(want===null){ maybeRender(true); } },250);
+    setTimeout(function(){ invalidateEnabled(); maybeRender(true); },1500);
   }
   function invalidateEnabled(){ enCache={v:null,ts:0}; }
+  /* 调试/自检用只读快照（不含任何凭证）：
+     window.__mimoQuotaState() → 门闸值、卡片数、被隐藏的官方卡数 */
+  window.__mimoQuotaState=function(){
+    return {
+      ver:window.__mimoQuotaPatch,
+      enabled:enCache.v, enabledAgeMs:enCache.v===null?null:Date.now()-enCache.ts,
+      quotaCards:Object.keys(cards).length,
+      hiddenCards:document.querySelectorAll('article[data-mq-hidden="1"]').length,
+      inlineSections:document.querySelectorAll('[data-mq-inline]').length,
+      keyCaptured:!!window.__mimoMgmtKey,
+    };
+  };
 
   /* ================= 4. 官方 class map 与文案（bundle 实测提取） ================= */
   /* hash 后缀取自 static/management.html（AuthFileQuota CSS/JSX）；
@@ -632,7 +764,7 @@ article[class*="AuthFileCard-module__card"]{animation-delay:0s !important}
     var key=findKey();
     if(!key){ sec.innerHTML=errorHtml('正在等待面板会话密钥…（硬刷新一次即可）'); return; }
     var en=await pluginEnabled(key);
-    if(!en){ invalidateEnabled(); if(sec.parentNode) sec.parentNode.removeChild(sec); delete inlineCache[name]; return; }
+    if(!en){ invalidateEnabled(); purgeAll(); return; }
     sec.innerHTML=loadingHtml();
     try{
       var files=await mimoAuthFiles(key);
@@ -648,6 +780,28 @@ article[class*="AuthFileCard-module__card"]{animation-delay:0s !important}
       var h2=errorHtml(e.message||e)+idleHtml();
       sec.innerHTML=h2; inlineCache[name]=h2; bindSec(sec,name);
     }
+  }
+  /* v7.5（R13）：插件禁用期间整卡隐藏。宿主不会把 mimo 的 auth 文件摘掉
+     （禁用后 /v0/management/auth-files 里仍是 status=active / unavailable=false，
+     只是 supports_quota、quota_provider 两个字段消失），官方面板照常渲染成
+     「一切正常」的卡片 —— 实际这些凭证一个都用不了。所以由补丁整卡隐藏，
+     启用后摘标记恢复（不销毁节点，React 那边完全无感）。 */
+  function mimoAuthCards(){
+    var out=[], arts=document.querySelectorAll('article[class*="AuthFileCard-module__card"]');
+    for(var i=0;i<arts.length;i++){ if(isMimoCard(arts[i])) out.push(arts[i]); }
+    return out;
+  }
+  function gateAuthCards(enabled){
+    var arts=mimoAuthCards();
+    for(var i=0;i<arts.length;i++){
+      var a=arts[i];
+      if(enabled){
+        if(a.getAttribute('data-mq-hidden')==='1') a.removeAttribute('data-mq-hidden');
+      } else if(a.getAttribute('data-mq-hidden')!=='1'){
+        a.setAttribute('data-mq-hidden','1');
+      }
+    }
+    return arts.length;
   }
   function injectAuthQuotas(){
     if(!isAuthRoute() || loggedOut()) return;
@@ -672,6 +826,7 @@ article[class*="AuthFileCard-module__card"]{animation-delay:0s !important}
     wipeCards(); loaded=false;
     var els=document.querySelectorAll('[data-mq-inline]');
     for(var i=0;i<els.length;i++){ if(els[i].parentNode) els[i].parentNode.removeChild(els[i]); }
+    gateAuthCards(false); /* 禁用闸门：官方 mimo 卡片一并隐藏（R13） */
   }
 
   /* ================= 8. 调度（P1/P2/P3，统一启用闸门） ================= */
@@ -679,8 +834,10 @@ article[class*="AuthFileCard-module__card"]{animation-delay:0s !important}
   /* P1 拉锯战修复：v6 只在 schedule/doRefresh 查 enabled，observer/2s 轮询仍
      无条件 placeCard ⇒ purge 后 2 秒内复活（probe 实测）。v6.1 把所有渲染入口
      统一收口到 maybeRender()：确认禁用（pluginEnabled=false）期间
-     placeCard/injectAuthQuotas 根本不会被调用。pluginEnabled 有 30s 缓存，
-     高频调度不产生 API 流量；用户重新启用插件后最多 30s 自动恢复。 */
+     placeCard/injectAuthQuotas 根本不会被调用。
+     v7.5：门闸状态不再只靠 TTL 轮询 —— 面板自己的开关动作（PATCH
+     /v0/management/plugins/<id>/enabled）与 plugins 列表响应都会即时刷新缓存
+     （见第 1、3 节），TTL 降到 10s 兜底 ⇒ 开关按下即生效，无需刷新页面。 */
   function renderPass(fetchData){
     if(isQuotaRoute() && !tabFilteredOut()){
       /* 快照为空才从缓存恢复 —— 千万不能在 observer 的每次巡检里重算渲染：
@@ -703,6 +860,7 @@ article[class*="AuthFileCard-module__card"]{animation-delay:0s !important}
     if(!key){ renderPass(fetchData); return; } /* 密钥未捕获：先渲染 idle，key 到手后 KEY_EVT 重新过闸 */
     pluginEnabled(key).then(function(ok){
       if(!ok){ purgeAll(); return; }
+      gateAuthCards(true); /* 闸门放行 ⇒ 恢复被隐藏的官方 mimo 卡片（R13） */
       renderPass(fetchData);
     });
   }
