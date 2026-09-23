@@ -510,8 +510,8 @@ CPA 升级后需重验。不想用图像时依旧可用 `exclude_models: ["Douba
      **前置**：config `remote-management.disable-auto-update-panel: true`
      （否则 updater 按 GitHub digest 覆写本地面板，实测源码
      `managementasset/updater.go:117,280`）。
-     验证脚本：`mimo_calw/scripts/panel-v75-verify.mjs`（上述三个问题逐条断言，
-     含「不刷新页面」的开关联动）与 `mimo_calw/scripts/panel-quota-probe3.mjs`。
+     验证脚本：`test/panel/panel-v75-verify.mjs`（上述三个问题逐条断言，
+     含「不刷新页面」的开关联动）与 `test/panel/panel-quota-probe3.mjs`。
   其余实时位置：`POST /v0/management/quota/fetch`（curl/脚本）与
   `GET /v0/management/plugins/mimo/status`（状态 JSON `usage` 字段）。
 

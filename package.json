@@ -19,5 +19,8 @@
   },
   "dependencies": {
     "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "playwright": "^1.60.0"
   }
 }

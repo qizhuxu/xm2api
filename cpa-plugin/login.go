@@ -610,7 +610,7 @@ func startOTPVerification(ntf, sid string) (*otpState, error) {
 	// Step 4：真正下发验证码。verifyEmail/verifyPhone GET 只是初始化验证会话
 	// （返回 maskedEmail/contentType），真正发码是 POST send{Email,Phone}Ticket，
 	// body 与短信完全一致（retry=0&icode=&_json=true）。
-	// 2026-09-23 抓包实锤（mimo_calw/scripts/otp-sendcode-recon.mjs）：缺
+	// 2026-09-23 抓包实锤（test/login/otp-sendcode-recon.mjs）：缺
 	// X-Requested-With 时 sendEmailTicket 恒 66108 —— 历史上"邮箱发码 API 逆向
 	// 失败"的真正原因。此前本函数只给 Phone 发码，Email 账号永远收不到邮件。
 	sendURL := fmt.Sprintf("%s/identity/auth/send%sTicket?_dc=%d", qrLoginProvider, method, time.Now().UnixMilli())

@@ -37,7 +37,7 @@
       重新施加，React 重建卡片也不会漏。
   v7.4.1（卡片入场 stagger 归零）：
   R10 #/auth-files 卡片「一个一个加载、mimo 明显慢于 Antigravity」：
-      实测（panel-auth-appear.mjs 带/不带补丁逐帧对照）是官方 CSS 入场
+      实测（test/panel/panel-auth-appear.mjs 带/不带补丁逐帧对照）是官方 CSS 入场
       动画按卡片序号错开（animation-delay 0s/0.18s/0.36s，逐张淡入 ~0.3s），
       Antigravity 恰好排第一张所以「快」；DOM 内容 2s 时已全部就绪，
       与补丁无关（无补丁对照延迟完全一致）。
@@ -722,7 +722,7 @@ article[data-mq-hidden="1"]{display:none !important}
     return /mimo/i.test(t) && !/antigravity/i.test(t);
   }
   function fileNameOf(a){
-    /* 实测 DOM（panel-dom-dump.mjs）：mimo 卡没有 fileName 元素，卡内文本是
+    /* 实测 DOM（test/panel/panel-dom-dump.mjs）：mimo 卡没有 fileName 元素，卡内文本是
        account（去扩展名，如 mimo-1000000001），无 .json、无 (userId)。
        取 account/fileName 元素原文（去扩展名归一由 pickEntry 负责）。 */
     var p=a.querySelector('[class*="AuthFileCard-module__account"]') ||

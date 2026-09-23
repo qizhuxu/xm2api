@@ -413,6 +413,7 @@ menu.mjs                交互式启停菜单（start.bat 只是它的入口）
 start.bat               双击入口
 server.mjs              入口①：反代服务（路由表 / 模型目录 / web_search 兼容层）
 creds.mjs               入口②：凭证工具（--ensure / --refresh / --status / --probe / --check）
+cpa-auth.mjs            CPA 插件认证文件导出（mimo.json，Linux 部署方案一）
 lib/
   upstream.mjs          转发内核：路由 / SSE 透传 / 脱敏日志 / 注入钩子 / 改写钩子
   config.mjs            config.yaml 加载器（env 覆盖、默认值兜底）
@@ -425,9 +426,16 @@ requirements.txt        examples 的可选依赖（openai + PyYAML）
 docs/getting-started.md 上手教程 + 报错对照表
 docs/architecture.md    架构与数据流详解
 docs/tools-and-search.md 工具调用 / 联网搜索实测矩阵 + 踩坑
+docs/investigation-mimo-auth-report.md 认证管线逆向调查报告
 cpa-plugin/             CLIProxyAPI 原生插件（线路2 的另一条走法，见下）
+test/
+  panel/                面板补丁验证脚本（Playwright，32 个）
+  login/                登录 / 注册 / OTP 调研脚本（6 个）
+  README.md             测试脚本说明与运行方法
+AGENT.md                代理工作规则（子代理 / 计划模式 / 目标模式 / 每轮提交）
 data/                   ⚠️ 凭证（gitignored）
 logs/                   ⚠️ 抓包日志（gitignored）
+jiu/                    归档区：非必要文件统一放这里（gitignored，见 jiu/README.md）
 ```
 
 `logs/path2-capture-<日期>.jsonl` 每请求一行：状态码、耗时、`x-trace-id`、
