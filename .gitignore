@@ -7,6 +7,18 @@ data/
 logs/
 backups/
 
+# 凭证文件兜底（防止 --out 自定义路径 / 误放置把凭证带进仓库；
+# 已跟踪的 cpa-plugin/examples/mimo.json 不受影响，gitignore 只管未跟踪文件）
+sso-session.json
+chrome-aes-key.bin
+local-creds.json
+Cookies
+mimo.json
+mimo-*.json
+auth/
+*.bin
+*.db
+
 # 通用
 node_modules/
 __pycache__/
