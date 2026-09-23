@@ -27,6 +27,19 @@ import { fileURLToPath } from "node:url";
 import { createRouteServer, listen, sendJson } from "./lib/upstream.mjs";
 import { config, CONFIG_PATH } from "./lib/config.mjs";
 import { SESSION_OUT } from "./lib/chrome-cookie.mjs";
+import { requestGuard, checkAdmin, adminKey, ADMIN_KEY_FILE } from "./lib/admin.mjs";
+import {
+  listAccounts,
+  readAccount,
+  removeAccount,
+  setAccountEnabled,
+  setAccountLabel,
+  importAccount,
+  extractLocalAccount,
+  fetchUsage,
+  fetchSessionUsage,
+} from "./lib/accounts.mjs";
+import { credentialsStatus } from "./lib/pipeline.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = __dirname;
@@ -289,6 +302,8 @@ const SUPPORTED = [
   "GET  /v1/models                模型清单（含 capabilities / price）",
   "GET  /v1/models/{id}           单个模型",
   "GET  /usage                    账号使用量查询（上游 /api/user/usage）",
+  "GET  /ui/                      管理界面（静态单页：状态/凭证/额度/设置）",
+  "ALL  /api/__admin/*            管理 API（需 X-Management-Key，见 data/admin-key.txt）",
   "GET  /__xm2api                 自检",
 ];
 
@@ -358,6 +373,160 @@ const SHUTDOWN_ROUTE = {
   },
 };
 
+/* ---------------------------- 管理 UI（/ui/ 静态单页）与管理 API（/api/__admin/*） */
+
+const UI_DIR = path.join(PROJECT_ROOT, "ui");
+const UI_MIME = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".ico": "image/x-icon",
+  ".json": "application/json; charset=utf-8",
+};
+
+/** 静态管理界面（零框架单页）。只读 ui/ 目录、防目录穿越。 */
+function serveUi(req, res, pathname) {
+  const rel = pathname.replace(/^\/ui\/?/, "") || "index.html";
+  const file = path.normalize(path.join(UI_DIR, rel));
+  if (!file.startsWith(UI_DIR + path.sep)) {
+    sendJson(res, 404, { error: { message: "not found", type: "invalid_request_error" } });
+    return;
+  }
+  try {
+    const buf = fs.readFileSync(file);
+    res.writeHead(200, {
+      "content-type": UI_MIME[path.extname(file).toLowerCase()] || "application/octet-stream",
+      "cache-control": "no-cache",
+    });
+    res.end(buf);
+  } catch {
+    sendJson(res, 404, { error: { message: `静态资源不存在：${rel}`, type: "invalid_request_error" } });
+  }
+}
+
+function readBody(req) {
+  return new Promise((resolve) => {
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", () => resolve(Buffer.alloc(0)));
+  });
+}
+
+/** 管理 API 统一鉴权包装（X-Management-Key 或 Authorization: Bearer）。 */
+const withAdmin = (fn) => (req, res, pathname) => {
+  if (!checkAdmin(req)) {
+    sendJson(res, 401, {
+      error: {
+        message: "管理 API 需要 X-Management-Key 请求头（密钥见 data/admin-key.txt 或启动日志）",
+        type: "invalid_request_error",
+        code: "unauthorized",
+      },
+    });
+    return;
+  }
+  fn(req, res, pathname);
+};
+
+async function adminStatus(req, res) {
+  const session = readSession();
+  sendJson(res, 200, {
+    ok: true,
+    name: "xm2api 线路2 (SSO route)",
+    port: PORT,
+    host: HOST,
+    upstream: MIMO_SERVER,
+    ui: `http://${HOST}:${PORT}/ui/`,
+    config: { file: path.relative(PROJECT_ROOT, CONFIG_PATH) || CONFIG_PATH, source: config.meta?.source },
+    session: session?.routeCookieHeader
+      ? { present: true, sid: session.sso?.sid || null, obtainedAt: session.sso?.obtainedAt || null }
+      : { present: false, fix: "凭证页 →「从本机 MiMo 客户端提取」（或 npm run refresh）" },
+    credentials: credentialsStatus(),
+    accounts: listAccounts().length,
+    security: {
+      admin_key_file: path.relative(PROJECT_ROOT, ADMIN_KEY_FILE) || ADMIN_KEY_FILE,
+      host_check: "开（防 DNS rebinding）",
+      origin_check: "开（浏览器跨站请求 403；同源 /ui/ 与 SDK 不受影响）",
+      allowed_hosts: config.server.allowedHosts,
+      allowed_origins: config.server.allowedOrigins,
+    },
+    logging: { enabled: config.logging.enabled, captureBody: config.logging.captureBody },
+  });
+}
+
+function adminAccountsList(req, res) {
+  sendJson(res, 200, { accounts: listAccounts() });
+}
+
+async function adminAccountsExtract(req, res) {
+  const r = await extractLocalAccount();
+  if (!r.ok) {
+    sendJson(res, 502, { error: { message: `${r.action || "extract"} 失败：${r.error}`, type: "upstream_error" }, steps: r.steps || [] });
+    return;
+  }
+  sendJson(res, 200, { ok: true, steps: r.steps || [], account: r.account });
+}
+
+async function adminAccountsImport(req, res) {
+  const raw = (await readBody(req)).toString("utf8");
+  const r = importAccount(raw);
+  if (!r.ok) {
+    sendJson(res, 400, { error: { message: r.error, type: "invalid_request_error" } });
+    return;
+  }
+  sendJson(res, 200, { ok: true, account: r.account });
+}
+
+async function adminAccountsPatch(req, res, pathname) {
+  const id = decodeURIComponent(pathname.split("/").pop());
+  let j = {};
+  try {
+    j = JSON.parse((await readBody(req)).toString("utf8") || "{}");
+  } catch {}
+  let out = null;
+  if (j.enabled !== undefined) out = setAccountEnabled(id, j.enabled);
+  else if (j.label !== undefined) out = setAccountLabel(id, j.label);
+  if (!out) {
+    sendJson(res, 404, { error: { message: `没有这个账号：${id}`, type: "invalid_request_error", code: "not_found" } });
+    return;
+  }
+  sendJson(res, 200, { ok: true, account: out });
+}
+
+function adminAccountsDelete(req, res, pathname) {
+  const id = decodeURIComponent(pathname.split("/").pop());
+  if (!removeAccount(id)) {
+    sendJson(res, 404, { error: { message: `没有这个账号：${id}`, type: "invalid_request_error", code: "not_found" } });
+    return;
+  }
+  sendJson(res, 200, { ok: true, removed: id });
+}
+
+async function adminQuota(req, res) {
+  const accounts = listAccounts().filter((a) => a.enabled);
+  const results = await Promise.all(
+    accounts.map(async (s) => {
+      const acc = readAccount(s.id);
+      try {
+        const u = await fetchUsage(acc);
+        return { id: s.id, label: s.label, ok: true, ...u };
+      } catch (e) {
+        return { id: s.id, label: s.label, ok: false, error: String(e.message || e) };
+      }
+    })
+  );
+  let session = null;
+  try {
+    const u = await fetchSessionUsage();
+    if (u) session = { ok: true, ...u };
+  } catch (e) {
+    session = { ok: false, error: String(e.message || e) };
+  }
+  sendJson(res, 200, { session, accounts: results, observed_at: new Date().toISOString() });
+}
+
 /* ------------------------------------------------ 服务 */
 
 const routeServer = createRouteServer({
@@ -372,8 +541,17 @@ const routeServer = createRouteServer({
   upstreamTimeoutMs: config.server.upstreamTimeoutMs,
   transform: webSearchCompat,
   onUnmatched,
+  guard: requestGuard,
   local: [
     SHUTDOWN_ROUTE,
+    { method: "GET", path: /^\/ui(\/.*)?$/, handler: (req, res, p) => serveUi(req, res, p) },
+    { method: "GET", path: "/api/__admin/status", handler: withAdmin(adminStatus) },
+    { method: "GET", path: "/api/__admin/accounts", handler: withAdmin(adminAccountsList) },
+    { method: "POST", path: "/api/__admin/accounts/extract", handler: withAdmin(adminAccountsExtract) },
+    { method: "POST", path: "/api/__admin/accounts/import", handler: withAdmin(adminAccountsImport) },
+    { method: "PATCH", path: /^\/api\/__admin\/accounts\/[^/]+$/, handler: withAdmin(adminAccountsPatch) },
+    { method: "DELETE", path: /^\/api\/__admin\/accounts\/[^/]+$/, handler: withAdmin(adminAccountsDelete) },
+    { method: "GET", path: "/api/__admin/quota", handler: withAdmin(adminQuota) },
     {
       method: "GET",
       path: "/v1/models",
@@ -503,6 +681,7 @@ const routeServer = createRouteServer({
         `Legacy path:       http://127.0.0.1:${PORT}/route/chat/completions`,
         `Meta:              http://127.0.0.1:${PORT}/__xm2api`,
         `使用量:            GET http://127.0.0.1:${PORT}/usage（账号剩余用量）`,
+        `管理界面:          http://127.0.0.1:${PORT}/ui/（密钥见 data/admin-key.txt）`,
         `联网搜索:          请求体加 "web_search": true，或 tools:[{type:"web_search"}]`,
         `推理等级:          上游不支持（reasoning_effort 实测无效），客户端无需设置；思考内容照常返回`,
         `工具调用:          tools + tool_choice，用法与 OpenAI 一致`,
@@ -518,10 +697,15 @@ const routeServer = createRouteServer({
 // （TTS/ASR 也走 chat/completions，给它们塞 web_search 会坏事）
 resolveModels().catch(() => {});
 
+// 管理密钥启动即生成/加载（而不是等第一个鉴权请求）：启动日志立刻可见，
+// UI/脚本也能在起服务后马上读到 data/admin-key.txt。
+adminKey();
+
 listen(routeServer, {
   onReady: () => {
     console.log(`logs → ${LOG_DIR}`);
     console.log(`meta → http://${HOST}:${PORT}/__xm2api`);
+    console.log(`ui   → http://${HOST}:${PORT}/ui/ （管理界面）`);
     console.log(`data → ${path.join(PROJECT_ROOT, "data")}`);
     console.log(`stop → POST http://${HOST}:${PORT}/__xm2api/shutdown （或菜单选 2）`);
   },

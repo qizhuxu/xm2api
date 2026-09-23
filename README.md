@@ -99,6 +99,9 @@ print(json.load(urllib.request.urlopen(req))["choices"][0]["message"]["content"]
 | `POST /route/chat/completions` | 聊天旧路径 |
 | `GET /v1/models` | **从上游 `/api/model/list` 实时拉取**（缓存 5 分钟，带 `capabilities` / `price`） |
 | `GET /v1/models/{id}` | 单个模型；不存在时 404 并列出全部可用 id |
+| `GET /usage` | 账号使用量（上游 `/api/user/usage`） |
+| `GET /ui/` | **管理界面**（静态单页：状态/凭证/额度/设置，见 [docs/ui-admin.md](docs/ui-admin.md)） |
+| `ALL /api/__admin/*` | 管理 API（需 `X-Management-Key`，密钥见 `data/admin-key.txt`） |
 | `GET /__xm2api` | 自检 JSON：凭证、上游、模型来源、**实测能力表** |
 | `POST /__xm2api/shutdown` | 让服务自己退出（**仅本机**，拒绝带 `Origin` 的浏览器请求） |
 
@@ -428,6 +431,8 @@ lib/
   config.mjs            config.yaml 加载器（env 覆盖、默认值兜底）
   pipeline.mjs          凭证链路：复制 Cookies → 读账号 → SSO 换 token → 落盘
   chrome-cookie.mjs     路径常量 + cookie/session 读写
+  admin.mjs             管理鉴权（X-Management-Key）+ 安全护栏（Host/Origin/CORS）
+  accounts.mjs          多账号库（data/accounts/*.json）+ 额度查询 + 401 续期
 examples/chat.py        客户端示例（openai 包 / 零依赖 HTTP 双实现）
 examples/tools-search.py 工具调用 + 联网搜索五项演示
 examples/all-models.py  4 类模型（7 个）全覆盖
@@ -435,11 +440,14 @@ requirements.txt        examples 的可选依赖（openai + PyYAML）
 docs/getting-started.md 上手教程 + 报错对照表
 docs/architecture.md    架构与数据流详解
 docs/tools-and-search.md 工具调用 / 联网搜索实测矩阵 + 踩坑
+docs/ui-admin.md       管理界面 / 管理 API / 安全护栏 说明
+ui/                    管理界面静态页（index.html / app.js / style.css）
 docs/investigation-mimo-auth-report.md 认证管线逆向调查报告
 cpa-plugin/             CLIProxyAPI 原生插件（线路2 的另一条走法，见下）
 test/
-  panel/                面板补丁验证脚本（Playwright，32 个）
-  login/                登录 / 注册 / OTP 调研脚本（6 个）
+  panel/                面板补丁验证/取证脚本（Playwright）
+  login/                登录 / 注册 / OTP 调研脚本
+  ui-smoke.mjs          管理界面 UI 冒烟
   README.md             测试脚本说明与运行方法
 AGENT.md                代理工作规则（子代理 / 计划模式 / 目标模式 / 每轮提交）
 data/                   ⚠️ 凭证（gitignored）

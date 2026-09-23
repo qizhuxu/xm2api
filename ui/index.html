@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>xm2api 管理</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="logo">Ⓜ</span> xm2api <span class="dim">管理界面</span></div>
+  <nav id="tabs">
+    <a href="#/status" data-tab="status">状态</a>
+    <a href="#/creds" data-tab="creds">凭证</a>
+    <a href="#/quota" data-tab="quota">额度</a>
+    <a href="#/settings" data-tab="settings">设置</a>
+  </nav>
+</header>
+
+<main>
+  <!-- 状态 -->
+  <section id="tab-status" class="tab">
+    <div class="cards" id="status-cards"><div class="card dim">加载中…</div></div>
+  </section>
+
+  <!-- 凭证 -->
+  <section id="tab-creds" class="tab hidden">
+    <div class="row-actions">
+      <button id="btn-extract" class="primary">从本机 MiMo 客户端提取</button>
+      <span class="dim">复制客户端 Cookies → 读 passToken/userId → SSO 换 serviceToken → 落盘</span>
+    </div>
+    <div id="extract-out" class="mono block hidden"></div>
+
+    <div class="card">
+      <h3>导入 mimo.json（多账号）</h3>
+      <p class="dim">粘贴 cpa 插件格式的凭证 JSON（<code>{"type":"mimo","pass_token":"…","user_id":"…"}</code>），或选择文件：</p>
+      <textarea id="import-text" rows="5" placeholder='{"type":"mimo","pass_token":"…","user_id":"…"}'></textarea>
+      <div class="row-actions">
+        <input type="file" id="import-file" accept=".json">
+        <button id="btn-import" class="primary">导入</button>
+        <span id="import-out" class="dim"></span>
+      </div>
+    </div>
+
+    <h2>账号列表</h2>
+    <table class="list" id="accounts-table">
+      <thead><tr><th>账号</th><th>凭证</th><th>来源</th><th>状态</th><th>操作</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <!-- 额度 -->
+  <section id="tab-quota" class="tab hidden">
+    <div class="row-actions">
+      <button id="btn-quota-refresh" class="primary">刷新额度</button>
+      <label>自动轮询
+        <select id="poll-select">
+          <option value="0">关闭</option>
+          <option value="30">30 秒</option>
+          <option value="60" selected>60 秒</option>
+          <option value="120">120 秒</option>
+        </select>
+      </label>
+      <span id="quota-observed" class="dim"></span>
+    </div>
+    <div class="cards" id="quota-cards"></div>
+  </section>
+
+  <!-- 设置 -->
+  <section id="tab-settings" class="tab hidden">
+    <div class="cards" id="settings-cards"></div>
+  </section>
+</main>
+
+<!-- 管理密钥登录 -->
+<div id="login" class="overlay hidden">
+  <div class="login-card">
+    <h2>管理密钥</h2>
+    <p class="dim">首次使用请输入管理密钥（见 <code>data/admin-key.txt</code> 或服务启动日志）。</p>
+    <input type="password" id="key-input" placeholder="xm2api-…" autocomplete="off">
+    <div class="row-actions">
+      <button id="btn-login" class="primary">进入</button>
+      <span id="login-err" class="bad"></span>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
