@@ -192,6 +192,7 @@ curl -H "Authorization: Bearer <你的 api-key>" http://127.0.0.1:8317/v1/models
 | `refresh_after` | string | `6h` | 多久主动换一次 serviceToken |
 | `model_ttl` | string | `10m` | 模型清单缓存时长 |
 | `exclude_models` | array | `[]` | 从模型列表隐藏的模型名，支持 `*` 通配，如 `["Doubao-*"]` |
+| `log_to_host` | boolean | `false` | 把插件事件写进宿主日志（启动 CPA 的终端）。默认关闭：终端不刷插件日志，事件无条件留痕到 `%TEMP%\mimo-plugin.log` |
 
 改完可以热重载，不用重启：
 

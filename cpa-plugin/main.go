@@ -56,6 +56,7 @@ type cfg struct {
 	RefreshAfter  string      `yaml:"refresh_after"`
 	ModelTTL      string      `yaml:"model_ttl"`
 	ExcludeModels []string    `yaml:"exclude_models"`
+	LogToHost     bool        `yaml:"log_to_host"`
 	OTPAutoMail   *otpMailCfg `yaml:"otp_auto_mail"`
 }
 
@@ -66,6 +67,7 @@ func defaultCfg() cfg {
 		WebSearchAuto: false,
 		RefreshAfter:  "6h",
 		ModelTTL:      "10m",
+		LogToHost:     false,
 	}
 }
 
@@ -344,6 +346,7 @@ func handleRegister(req []byte) []byte {
 				{"Name": "refresh_after", "Type": "string", "Description": "多久主动换一次 serviceToken，默认 6h"},
 				{"Name": "model_ttl", "Type": "string", "Description": "模型清单缓存时长，默认 10m"},
 				{"Name": "exclude_models", "Type": "array", "Description": "要从模型列表里隐藏的模型名，支持 * 通配。例如 [\"Doubao-*\"]。图像模型（Doubao-Seedream-5.0-pro）现已可经插件服务 /v1/images/generations，是否隐藏取决于客户端需求"},
+				{"Name": "log_to_host", "Type": "boolean", "Description": "把插件事件写进宿主日志（启动 CPA 的终端）。默认关闭 —— 事件只进 %TEMP%/mimo-plugin.log 文件日志，不刷终端"},
 			},
 		},
 		"capabilities": map[string]any{

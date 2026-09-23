@@ -25,6 +25,13 @@ func dbg(format string, args ...any) {
 	if !debugOn {
 		return
 	}
+	logf(format, args...)
+}
+
+// logf 无条件写文件日志（不受 MIMO_PLUGIN_DEBUG 影响）。
+// hostLog 关闭终端输出（log_to_host=false）后，事件改走这里留痕 ——
+// 终端安静，排查仍有据。
+func logf(format string, args ...any) {
 	f, err := os.OpenFile(debugFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return

@@ -81,7 +81,15 @@ func fieldHeader(m map[string]json.RawMessage, key string) http.Header {
 	return http.Header{}
 }
 
+// hostLog 写宿主日志（= 启动 CPA 的终端）。**默认关闭**（log_to_host=false）：
+// 插件事件没必要刷宿主终端（用户要求），此时事件无条件写进
+// %TEMP%/mimo-plugin.log 文件日志留痕；要排查宿主侧链路时在
+// plugins.configs.mimo.log_to_host: true 打开终端输出。
 func hostLog(level, msg string) {
+	if !config().LogToHost {
+		logf("[host-%s] %s", level, msg)
+		return
+	}
 	_, _ = hostCall(methodHostLog, map[string]any{"level": level, "message": msg})
 }
 
