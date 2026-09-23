@@ -14,6 +14,11 @@
      observer → 重算无限循环，主线程堵死。
      修复：巡检只恢复快照不重算；重算仅在数据刷新完成时。
      实测点击导航 首访 259ms / 切回 184ms 出数据卡。
+  R9 残余风暴（用户实测「还是可能卡死」）：paintFromCache 在 key 空窗/
+     失败分支仍会被高频调用，重算→时间文本变→写 DOM→observer 循环。
+     修复：数据版本守卫（lastPaintTs===dataCache.ts 且快照在 ⇒ 绝不重算）
+     ——「渲染进快照」与「挂载到 DOM（placeCards）」彻底分层。
+     压力实测（stale+key 空窗+持续 observer）主线程响应 1~2ms。
   v7.3（即时显示，SWR）：
   R6 quota 页总有占位→数据的跳变（不像 #/auth-files 原生即时）
      根因：拉数据与画卡耦合，进页面必须等调度+API 往返。
@@ -475,8 +480,13 @@
   function loadCache(){ try{ var s=sessionStorage.getItem(CACHE_KEY); if(s) dataCache=JSON.parse(s); }catch(e){} }
   function saveCache(){ try{ sessionStorage.setItem(CACHE_KEY, JSON.stringify(dataCache)); }catch(e){} }
   function cacheStale(){ return !dataCache || !dataCache.entries || !dataCache.entries.length || (Date.now()-(dataCache.ts||0))>60000; }
+  /* 把数据渲染进快照（c.html）。数据版本（dataCache.ts）没变就绝不重算：
+     renderBody 的相对时间每次都变，重算必写 DOM ⇒ observer 风暴；
+     DOM 丢失/重挂是 placeCards 的职责（从快照恢复），与此无关。 */
+  var lastPaintTs=-1;
   function paintFromCache(){
     if(!dataCache || !dataCache.entries || !dataCache.entries.length) return false;
+    if(lastPaintTs===dataCache.ts && Object.keys(cards).length) return true;
     var live={};
     for(var i=0;i<dataCache.entries.length;i++){
       var e=dataCache.entries[i];
@@ -486,7 +496,7 @@
         (q.__error)?errorHtml(q.__error):renderBody(q));
     }
     for(var k in cards){ if(!live[k]) removeCardFor(k); }
-    loaded=true;
+    loaded=true; lastPaintTs=dataCache.ts;
     return true;
   }
   async function refreshData(silent){
@@ -548,12 +558,13 @@
       if(!silent && c.el) c.el.innerHTML=head+loadingHtml();
       var q=await fetchQuotaFor(key,f.auth_index||'');
       paintCard(c,name,head,(q&&q.__error)?errorHtml(q.__error):renderBody(q||{}));
-      /* 同步进缓存 */
+      /* 同步进缓存（数据版本变化 ⇒ paintFromCache 下次会重算） */
       if(dataCache&&dataCache.entries){
         for(var i=0;i<dataCache.entries.length;i++){
           if(dataCache.entries[i].name===name){ dataCache.entries[i]={name:name,f:f,q:q}; }
         }
         dataCache.ts=Date.now(); saveCache();
+        lastPaintTs=-1;
       }
     }catch(e){
       paintCard(c,name,'<h3>'+esc(name)+'</h3>',errorHtml(e.message||e));
