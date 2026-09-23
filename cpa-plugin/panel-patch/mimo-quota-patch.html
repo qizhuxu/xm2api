@@ -1,6 +1,14 @@
 <!--
-  MiMo quota patch for CLIProxyAPI Management Center (v7.3.9 官方面板) — v7.4
+  MiMo quota patch for CLIProxyAPI Management Center (v7.3.9 官方面板) — v7.4.1
   ------------------------------------------------------------------
+  v7.4.1（卡片入场 stagger 归零）：
+  R10 #/auth-files 卡片「一个一个加载、mimo 明显慢于 Antigravity」：
+      实测（panel-auth-appear.mjs 带/不带补丁逐帧对照）是官方 CSS 入场
+      动画按卡片序号错开（animation-delay 0s/0.18s/0.36s，逐张淡入 ~0.3s），
+      Antigravity 恰好排第一张所以「快」；DOM 内容 2s 时已全部就绪，
+      与补丁无关（无补丁对照延迟完全一致）。
+      修复：一行 CSS 把 animation-delay 归零 —— 所有卡片同时浮现，
+      与 Antigravity 同速；淡入时长等官方动画原样保留。
   v7.4（找回 v7 的秒恢复）：
   R7 对比 v7 为什么变卡：v7 有 lastHtml 快照，React 丢卡后立即恢复显示；
      v7.1~v7.3 的 removeCards 连 html 快照一起清空，且 React 路由过渡期
@@ -138,6 +146,10 @@
     3. 硬刷新面板页面（Ctrl+F5；静态文件，无需重启 CPA）。
 -->
 <style>
+/* v7.4.1：官方 AuthFileCard 入场动画按序号 stagger（0s/0.18s/0.36s…）会让
+   后面的卡「一个一个」慢慢浮现（DOM 早就好了，只是动画没轮到）。归零
+   animation-delay，所有卡与第一张（Antigravity）同时入场；淡入本身保留。 */
+article[class*="AuthFileCard-module__card"]{animation-delay:0s !important}
 .mq-card{padding:14px 16px;border:1px solid rgba(128,128,128,.35);border-radius:10px;
   font:13px/1.6 system-ui,-apple-system,sans-serif;background:rgba(128,128,128,.06);margin:0 0 12px}
 .mq-card h3{margin:0 0 8px;font-size:14px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
@@ -148,7 +160,7 @@
 <script>
 /* MiMo quota patch v7.4 — 见文件头注释。密钥只驻留内存变量，不落盘、不外发。 */
 (function(){
-  if(window.__mimoQuotaPatch) return; window.__mimoQuotaPatch=7.4;
+  if(window.__mimoQuotaPatch) return; window.__mimoQuotaPatch=7.4.1;
 
   /* ================= 1. 会话密钥自动捕获（先于面板 bundle 执行） ================= */
   var KEY_EVT='mimo-key-captured';
