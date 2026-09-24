@@ -411,7 +411,10 @@ npm run cpa-auth                    # 导出账户凭证 data/mimo.json（CPA �
 - 只改动协议必需的 `host` / `content-length`
 - SSE 逐块透传（不缓冲），额外补 `cache-control: no-cache` / `x-accel-buffering: no` 防中间层缓存
 - 响应状态码/头/体全透传
-- 401 不做自动重试 —— 刷新凭证是 `creds.mjs` 的职责
+- 401 默认自动回马一次（二期 `server.autoRenew`，默认开）：账号号用 `pass_token` 续期
+  → 原号重试、失败换号；会话凭证跑一次 creds 链路；**流式不重试**、只回马一次，
+  仍失败则原响应照常透传。设 `autoRenew: false` 回到旧契约「401 原样返回，
+  刷新凭证是 `creds.mjs` 的职责」
 
 完整流程、函数职责、边界情况、自验证方法 → **[docs/architecture.md](docs/architecture.md)**
 
@@ -495,7 +498,9 @@ XM2API_PORT=18790 npm run serve
 要用别的端口调 SDK，记得同步改 `base_url`。
 
 **返回 401 且 body 为空**
-`serviceToken` 失效 → `npm run refresh`。若刷新报 `passToken` 失效，需回客户端重新登录。
+`serviceToken` 失效。默认 `autoRenew` 已开：反代会先用 `pass_token` 自动续期/换号重试一次
+（抓包日志 `request.retries` 可查）；仍 401 再 `npm run refresh`（或 UI 凭证页一键提取）。
+若刷新报 `passToken` 失效，需回客户端重新登录。
 
 **返回 400 `chat_model_not_public`**
 鉴权已通过，只是模型名不在对客清单 → 用 `mimo-pro` / `mimo-flash`。

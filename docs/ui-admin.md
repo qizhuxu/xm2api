@@ -63,8 +63,22 @@
 逃生口（自建域名/远程访问）：`config.yaml` 的 `server.allowedHosts` / `server.allowedOrigins`
 加白；⚠️ 对外开放前务必给管理 API 换强密钥（env `XM2API_ADMIN_KEY`）。
 
-## 二期路线图（已确认要做）
+## 二期（已实现）：账号池轮询 + 401 自动续期轮询
 
-1. **请求级账号轮询**：多账号池负载均衡 / 坏号冷却 / 故障切换（对齐 CPA 凭证池）；
-2. **凭证自动续期轮询**：转发链路 401 触发立即续期 + 定时兜底（对齐 cpa 插件）；
-3. 远期：SSO 扫码/密码登录页、用量图表。
+- **请求级账号轮询**：转发从 `data/accounts/` 按 round-robin 选号注入
+  （`server.pool.enabled/strategy/cooldownMs`）；坏号（401/403）自动冷却
+  `cooldownMs` 并跳过、换号重试；禁用账号跳过；池空/关闭 ⇒ 回落 sso-session
+  单会话（单账号行为不劣化）。
+- **401 自动续期**（`server.autoRenew`，默认开）：仅**非流式、尚未向客户端写响应**
+  时回马一次 —— 账号号用 `pass_token` 走 SSO 两阶段续期→原号重试，续期失败则冷却
+  并换号；会话凭证跑一次完整 creds 链路（force）。**流式绝不重试**（writeHead 即
+  透传承诺）；重试与选号全记抓包日志 `request.retries`。
+- **定时兜底续期**（`server.refreshAfterMs`，默认 6h，0=纯事件驱动）：serviceToken
+  是无有效期声明的会话 cookie，401 事件驱动是主力，定时只是兜底。
+- 池统计（成功/失败/冷却中/续期次数）见凭证页「池统计」列；当前策略见设置页。
+
+实测：`test/pool-test.mjs`（mock 上游确定性 **9/9**：A,B,A,B 轮询 / 坏号无感切换且
+冷却期内不再被选 / 流式 401 不回马 / 统计正确）+ `test/renew-test.mjs`（真实 SSO
+**4/4**：坏 token → 401 → pass_token 续期换新 364 字符 token → 重试 200，客户端无感）。
+
+远期：SSO 扫码/密码登录页、用量图表。

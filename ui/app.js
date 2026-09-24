@@ -100,7 +100,7 @@ async function renderAccounts() {
   const { accounts } = await api("GET", "/accounts");
   const tb = $("#accounts-table tbody");
   if (!accounts.length) {
-    tb.innerHTML = `<tr><td colspan="5" class="dim">还没有账号 —— 用上面的按钮提取或导入</td></tr>`;
+    tb.innerHTML = `<tr><td colspan="6" class="dim">还没有账号 —— 用上面的按钮提取或导入</td></tr>`;
     return;
   }
   tb.innerHTML = accounts
@@ -108,10 +108,17 @@ async function renderAccounts() {
       const creds = [];
       creds.push(a.has_pass_token ? '<span class="ok">passToken ✓</span>' : '<span class="dim">passToken ✗</span>');
       creds.push(a.has_service_token ? `<span class="ok">serviceToken ✓(${esc(a.service_token_len)}B)</span>` : '<span class="dim">serviceToken ✗</span>');
+      const s = a.stats || {};
+      const cooling = (s.cooldownUntil || 0) > Date.now();
+      const poolStat =
+        `<span class="ok">✓${esc(s.success || 0)}</span> <span class="${s.failed ? "bad" : "dim"}">✗${esc(s.failed || 0)}</span>` +
+        (s.renewCount ? `<div class="dim">续期 ×${esc(s.renewCount)}</div>` : "") +
+        (cooling ? '<div class="bad">冷却中…</div>' : "");
       return `<tr data-id="${esc(a.id)}">
         <td><b>${esc(a.label)}</b><div class="dim mono">${esc(a.user_id)}</div></td>
         <td>${creds.join("<br>")}</td>
         <td class="dim">${esc(a.source || "-")}<div class="dim">${esc((a.obtained_at || "").slice(0, 19).replace("T", " "))}</div></td>
+        <td>${poolStat}</td>
         <td>${a.enabled ? '<span class="badge on">启用</span>' : '<span class="badge off">禁用</span>'}</td>
         <td>
           <button data-act="toggle">${a.enabled ? "禁用" : "启用"}</button>
@@ -221,7 +228,13 @@ async function renderSettings() {
   const s = await api("GET", "/status");
   const key = apiKey();
   const masked = key ? key.slice(0, 8) + "…" + key.slice(-4) : "—";
+  const p = s.pool || {};
   $("#settings-cards").innerHTML = `
+    <div class="card"><h3>账号池与续期（二期）</h3>${kv([
+      ["池策略", p.enabled ? `开 · ${esc(p.strategy || "round-robin")} · 坏号冷却 ${Math.round((p.cooldown_ms || 0) / 1000)}s` : "关（回落 sso-session 单会话）"],
+      ["401 自动续期", p.auto_renew ? '<span class="ok">开</span> —— pass_token 续期→原号重试，失败换号；只回马一次；<b>流式不重试</b>' : "关"],
+      ["定时兜底续期", p.refresh_after_ms ? `每 ${Math.round(p.refresh_after_ms / 3600000)} 小时` : "关（纯 401 事件驱动）"],
+    ])}<p class="dim">serviceToken 是无有效期声明的会话 cookie —— 401 事件驱动是主力，定时只是兜底。</p></div>
     <div class="card"><h3>管理密钥</h3>${kv([
       ["当前密钥", `<code>${esc(masked)}</code> <button id="btn-copy-key">复制</button>`],
       ["存放位置", `<code>${esc(s.security.admin_key_file)}</code>`],
@@ -234,7 +247,7 @@ async function renderSettings() {
       ["allowedOrigins", esc((s.security.allowed_origins || []).join(", ") || "（仅同源）")],
     ])}<p class="dim">SDK / curl 不带 Origin，不受影响；任意网页 JS 已无法调用本服务。</p></div>
     <div class="card"><h3>文档</h3><p class="dim">管理界面说明 <code>docs/ui-admin.md</code>；反代说明 <code>README.md</code>；
-      二期（多账号请求级轮询 / 401 自动续期轮询）见路线图。</p></div>`;
+      池与续期语义同见 <code>docs/ui-admin.md</code> 二期章节。</p></div>`;
   $("#btn-copy-key").addEventListener("click", async () => {
     await navigator.clipboard.writeText(key);
     $("#btn-copy-key").textContent = "已复制";
