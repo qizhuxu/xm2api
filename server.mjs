@@ -38,8 +38,13 @@ import {
   extractLocalAccount,
   fetchUsage,
   fetchSessionUsage,
+  pickAccount,
+  reportSuccess,
+  reportFailure,
+  renewAccount,
+  routeCookie,
 } from "./lib/accounts.mjs";
-import { credentialsStatus } from "./lib/pipeline.mjs";
+import { credentialsStatus, ensureCredentials } from "./lib/pipeline.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = __dirname;
@@ -99,15 +104,100 @@ function readSession() {
 }
 
 /**
- * Attach the SSO credentials. `/api/route/*` is not authenticated by the
- * Chromium passToken dump (that yields 401) — it needs the per-sid
- * serviceToken obtained by scripts/06 + 08. Never overrides a caller's cookie.
+ * 注入转发凭证（二期：账号池优先）。调用方自带 Cookie 不覆盖；目标 host 不匹配不注入。
+ *   pool.enabled 且池里有号 ⇒ round-robin 选号（跳过禁用/冷却中的）；
+ *   池空/关闭 ⇒ 回落 sso-session 单会话（与一期行为完全一致）。
+ * 选了谁记进 usedCred（headers 对象为键），供 401 回马枪与 onResult 统计。
  */
+const usedCred = new Map();
+
+function withCookie(headers, cookie) {
+  return { ...headers, cookie };
+}
+
 function inject(headers, target) {
   if (headers.cookie || headers.Cookie) return;
-  if (!/mimo-server-cn\./i.test(target.hostname)) return;
+  // 只给「我们配置的上游 / mimo-server-cn」注入凭证 —— 别的 host 永远不带 Cookie
+  //（防凭证外泄；自定义上游（如测试 mock）按配置的 upstream 判定）。
+  const upstreamHost = (() => {
+    try {
+      return new URL(config.server.upstream).hostname;
+    } catch {
+      return "";
+    }
+  })();
+  if (target.hostname !== upstreamHost && !/mimo-server-cn\./i.test(target.hostname)) return;
+  if (config.server.pool.enabled) {
+    const acc = pickAccount();
+    if (acc) {
+      headers.cookie = routeCookie(acc);
+      usedCred.set(headers, { kind: "account", id: acc.user_id });
+      return;
+    }
+  }
   const cookie = readSession()?.routeCookieHeader;
-  if (cookie) headers.cookie = cookie;
+  if (cookie) {
+    headers.cookie = cookie;
+    usedCred.set(headers, { kind: "session" });
+  }
+}
+
+/**
+ * 401/403 回马枪（二期，upstream.mjs on401 钩子；只回马一次由 upstream 保证）：
+ *   账号号 ⇒ autoRenew 时先用 pass_token 续期原号重试；续期失败/没有 pass_token
+ *   ⇒ 冷却该号并换号重试；会话凭证 ⇒ 跑一次完整 creds 链路（force）再试。
+ *   都不行 ⇒ 返回 null，原响应照常透传（透明性不变）。
+ */
+async function on401({ status, headers }) {
+  const used = usedCred.get(headers) || { kind: "session" };
+  usedCred.delete(headers);
+  try {
+    if (used.kind === "account") {
+      const acc = readAccount(used.id);
+      if (config.server.autoRenew && acc?.pass_token) {
+        try {
+          const renewed = await renewAccount(acc);
+          const h2 = withCookie(headers, routeCookie(renewed));
+          usedCred.set(h2, { kind: "account", id: renewed.user_id });
+          return { headers: h2, reason: `续期 account=${used.id}` };
+        } catch (e) {
+          console.error(`[renew] account=${used.id} 续期失败：${e.message}`);
+        }
+      }
+      reportFailure(used.id, "unauthorized");
+      if (config.server.pool.enabled) {
+        const other = pickAccount(used.id);
+        if (other) {
+          const h2 = withCookie(headers, routeCookie(other));
+          usedCred.set(h2, { kind: "account", id: other.user_id });
+          return { headers: h2, reason: `换号 account=${other.user_id}（原号 HTTP ${status}）` };
+        }
+      }
+      return null;
+    }
+    // 会话凭证：完整链路续期（复制 Cookies → 读账号 → SSO 换 token → 落盘）
+    if (!config.server.autoRenew) return null;
+    const sess = readSession();
+    if (!sess?.tokens?.passToken) return null;
+    const r = await ensureCredentials({ sid: config.credentials.sid, force: true });
+    if (!r.ok) return null;
+    const cookie = readSession()?.routeCookieHeader;
+    if (!cookie) return null;
+    const h2 = withCookie(headers, cookie);
+    usedCred.set(h2, { kind: "session" });
+    return { headers: h2, reason: "续期 sso-session" };
+  } catch (e) {
+    console.error(`[on401] ${e.message}`);
+    return null;
+  }
+}
+
+/** 池统计：每次上游响应记成功/失败（401/403 的失败在 on401 里已记过）。 */
+function onResult({ status, headers }) {
+  const used = usedCred.get(headers);
+  if (!used || used.kind !== "account") return;
+  if (status < 400) reportSuccess(used.id);
+  else if (status !== 401 && status !== 403) reportFailure(used.id, "error");
 }
 
 /* ------------------------------------------------ 模型清单（上游 /api/model/list） */
@@ -452,6 +542,13 @@ async function adminStatus(req, res) {
       allowed_hosts: config.server.allowedHosts,
       allowed_origins: config.server.allowedOrigins,
     },
+    pool: {
+      enabled: config.server.pool.enabled,
+      strategy: config.server.pool.strategy,
+      cooldown_ms: config.server.pool.cooldownMs,
+      auto_renew: config.server.autoRenew,
+      refresh_after_ms: config.server.refreshAfterMs,
+    },
     logging: { enabled: config.logging.enabled, captureBody: config.logging.captureBody },
   });
 }
@@ -542,6 +639,8 @@ const routeServer = createRouteServer({
   transform: webSearchCompat,
   onUnmatched,
   guard: requestGuard,
+  on401,
+  onResult,
   local: [
     SHUTDOWN_ROUTE,
     { method: "GET", path: /^\/ui(\/.*)?$/, handler: (req, res, p) => serveUi(req, res, p) },
@@ -700,6 +799,29 @@ resolveModels().catch(() => {});
 // 管理密钥启动即生成/加载（而不是等第一个鉴权请求）：启动日志立刻可见，
 // UI/脚本也能在起服务后马上读到 data/admin-key.txt。
 adminKey();
+
+// 定时兜底续期（二期）：账号 service_token 比 refreshAfterMs 更旧就主动换新。
+// serviceToken 是无有效期声明的会话 cookie —— 401 事件驱动是主力（on401），
+// 这里只是兜底；refreshAfterMs=0 关闭。
+if (config.server.refreshAfterMs > 0) {
+  const timer = setInterval(async () => {
+    const now = Date.now();
+    for (const s of listAccounts()) {
+      if (!s.enabled || !s.has_pass_token) continue;
+      const acc = readAccount(s.id);
+      if (!acc) continue;
+      const age = acc.obtained_at ? now - Date.parse(acc.obtained_at) : now;
+      if (age <= config.server.refreshAfterMs) continue;
+      try {
+        await renewAccount(acc);
+        console.log(`[renew] 兜底续期 account=${acc.user_id}（原 token 年龄 ${Math.round(age / 60000)} 分钟）`);
+      } catch (e) {
+        console.error(`[renew] 兜底续期失败 account=${s.id}: ${e.message}`);
+      }
+    }
+  }, 10 * 60 * 1000);
+  timer.unref?.();
+}
 
 listen(routeServer, {
   onReady: () => {
