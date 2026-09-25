@@ -107,6 +107,11 @@ print(json.load(urllib.request.urlopen(req))["choices"][0]["message"]["content"]
 
 未知路径返回 404 时会附上可用端点清单，不会只丢一句 `no route`。
 
+**管理界面**：`http://127.0.0.1:18787/ui/`（仪表盘样式：KPI 卡 + 用量图表 + 侧边栏导航，
+深浅色双主题）——账号登录（**扫码 / 密码 / 新设备 OTP**、本机一键提取、mimo.json 导入）、
+多账号管理、额度环形卡 + 趋势图表、账号池与续期策略一览。管理密钥见 `data/admin-key.txt`；
+完整说明 → **[docs/ui-admin.md](docs/ui-admin.md)**。
+
 上游本身就是一套 OpenAI 风格的镜像接口，反代只是把 `/v1/*` 映射过去：
 
 ```

@@ -12,10 +12,10 @@
 
 | 页签 | 功能 |
 |---|---|
-| 状态 | 服务/上游/转发会话/账号库/安全护栏一览 |
-| 凭证 | **从本机 MiMo 客户端一键提取**（复制 Cookies → 读 passToken/userId → SSO 换 serviceToken → 落盘）；**导入 mimo.json**（多账号）；列表/启用/禁用/删除 |
-| 额度 | 每账号一张卡（剩余 % + 进度条 + 重置日期）；手动刷新 + **自动轮询**（关闭/30s/60s/120s） |
-| 设置 | 管理密钥查看/复制、安全护栏状态、文档索引 |
+| 仪表盘 | KPI 四卡（账号总数/今日请求/平均剩余额度/服务状态）+ **额度趋势折线图** + **近 30 天请求量柱状图** + 账号池摘要 + 快捷操作 |
+| 凭证 | **在线登录小米账号**（扫码 / 密码 / 新设备 OTP）；**从本机 MiMo 客户端一键提取**；**导入 mimo.json**（多账号）；列表/启用/禁用/删除 |
+| 额度 | 每账号一张环形进度卡（剩余 % + 重置日期）；手动刷新 + **自动轮询**（关闭/30s/60s/120s） |
+| 设置 | 账号池与续期策略、管理密钥查看/复制、安全护栏状态 |
 
 ## 管理 API（全部需 `X-Management-Key`，也接受 `Authorization: Bearer <key>`）
 
@@ -28,6 +28,31 @@
 | `PATCH /api/__admin/accounts/<id>` | `{"enabled":true\|false}` 或 `{"label":"…"}` |
 | `DELETE /api/__admin/accounts/<id>` | 删除账号 |
 | `GET /api/__admin/quota` | 全部启用账号 + 当前转发会话的额度（上游 `/api/user/usage`） |
+| `GET /api/__admin/usage/history` | 额度历史（图表数据层，10 分钟节流） |
+| `GET /api/__admin/usage/daily?days=30` | 每日请求量序列（转发侧 onResult 统计） |
+| `POST /api/__admin/login/qr/start` | 开始扫码登录（返回二维码图片 URL + 会话 id，后台长轮询） |
+| `GET /api/__admin/login/qr/status?id=` | 扫码会话状态（pending/confirmed/failed/timeout） |
+| `POST /api/__admin/login/password` | 账号密码登录（成功或返回 `awaiting-otp` 自动发码） |
+| `POST /api/__admin/login/otp` | 提交新设备验证码完成登录 |
+| `GET /api/__admin/login/otp/status?id=` | OTP 会话状态（验证方式与掩码） |
+
+### 在线登录（三期）
+
+「凭证」页顶部的**在线登录小米账号**卡支持扫码 / 密码双通道，协议移植自
+`cpa-plugin/login.go`（逆向实测权威）：
+
+- **扫码**：生成二维码（小米官方图片端点，`_qrsize=480`）→ 手机「设置 → 小米账号」扫码
+  → 后台长轮询确认 → 凭证自动入库；
+- **密码**：`serviceLoginAuth2`（`hash=md5Upper(密码)`）→ 成功直接入库；触发
+  **新设备保护** 时自动发验证码（邮箱/短信，掩码提示）→ 页面输入验证码完成登录；
+  风控信号（captchaUrl 人机验证链接 / secondValidation）如实提示；
+- **安全**：密码/验证码只在本机内存中流转 —— 不打日志、不进错误消息、不落盘；
+  跳转收割限制在 `*.xiaomi.com`（防开放重定向）。
+
+实测：`test/login-test.mjs`（mock 全流程 **16/16**：扫码确认/密码成功/错误与
+captcha/OTP 发码-错码-对码/密码零泄漏）+ `test/login-real.mjs`（**真实链路**：
+真实密码提交 → `securityStatus=16` → 真实发码到邮箱通道 ✓；收码自动化受限于
+测试账号邮箱不在自有邮局，用你自己的账号在页面上可全流程走通）。
 
 管理密钥优先级：`env XM2API_ADMIN_KEY` > `config.yaml server.adminKey` > `data/admin-key.txt`（自动生成）。
 ⚠️ 固定密钥请用环境变量，别把真实密钥写进 config.yaml 提交。
@@ -81,4 +106,15 @@
 冷却期内不再被选 / 流式 401 不回马 / 统计正确）+ `test/renew-test.mjs`（真实 SSO
 **4/4**：坏 token → 401 → pass_token 续期换新 364 字符 token → 重试 200，客户端无感）。
 
-远期：SSO 扫码/密码登录页、用量图表。
+### 用量图表（三期）
+
+仪表盘两张图，零第三方依赖手写 SVG（渐变面积 + 发光描边 + 悬浮明细）：
+
+- **额度趋势**（折线）：`data/usage-history.json` —— 每次额度查询记一点（10 分钟
+  节流，每账号 1000 点环形淘汰），多序列（当前会话 + 各账号）同图对比；
+- **近 30 天请求量**（柱状）：`data/usage-daily.json` —— 转发侧 `onResult` 统计
+  成功/错误，按日聚合留 60 天。
+
+数据自动积累：额度页的自动轮询、仪表盘的「刷新数据」都会写入历史。
+
+远期（按需）：更多图表样式、用量导出、桌面通知。
