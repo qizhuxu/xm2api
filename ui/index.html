@@ -3,83 +3,142 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>xm2api 管理</title>
+<title>xm2api 管理控制台</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<header class="top">
-  <div class="brand"><span class="logo">Ⓜ</span> xm2api <span class="dim">管理界面</span></div>
-  <nav id="tabs">
-    <a href="#/status" data-tab="status">状态</a>
-    <a href="#/creds" data-tab="creds">凭证</a>
-    <a href="#/quota" data-tab="quota">额度</a>
-    <a href="#/settings" data-tab="settings">设置</a>
-  </nav>
-</header>
-
-<main>
-  <!-- 状态 -->
-  <section id="tab-status" class="tab">
-    <div class="cards" id="status-cards"><div class="card dim">加载中…</div></div>
-  </section>
-
-  <!-- 凭证 -->
-  <section id="tab-creds" class="tab hidden">
-    <div class="row-actions">
-      <button id="btn-extract" class="primary">从本机 MiMo 客户端提取</button>
-      <span class="dim">复制客户端 Cookies → 读 passToken/userId → SSO 换 serviceToken → 落盘</span>
+<div class="app">
+  <aside class="side">
+    <div class="brand">
+      <div class="logo">Ⓜ</div>
+      <div><b>xm2api</b><span>管理控制台</span></div>
     </div>
-    <div id="extract-out" class="mono block hidden"></div>
+    <nav class="nav" id="nav">
+      <a href="#/dashboard" data-view="dashboard">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="2"/><rect x="14" y="3" width="7" height="5" rx="2"/><rect x="14" y="12" width="7" height="9" rx="2"/><rect x="3" y="16" width="7" height="5" rx="2"/></svg>
+        仪表盘</a>
+      <a href="#/creds" data-view="creds">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a5 5 0 0 1 5 5v2h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2h2V7a5 5 0 0 1 5-5z"/><circle cx="12" cy="15" r="2"/></svg>
+        凭证与账号</a>
+      <a href="#/quota" data-view="quota">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l5-6 4 4 6-8"/><path d="M14 7h5v5"/></svg>
+        额度</a>
+      <a href="#/settings" data-view="settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.3 1a7 7 0 0 0-1.7-1L14.5 3h-4l-.4 2.6a7 7 0 0 0-1.7 1l-2.3-1-2 3.4L6 11a7 7 0 0 0 0 2l-2 1.5 2 3.4 2.3-1a7 7 0 0 0 1.7 1l.4 2.6h4l.4-2.6a7 7 0 0 0 1.7-1l2.3 1 2-3.4-2-1.5c.06-.33.1-.66.1-1z"/></svg>
+        设置</a>
+    </nav>
+    <div class="foot">
+      <span class="pill"><i class="dot" id="svc-dot"></i><span id="svc-text">连接中…</span></span>
+      <button class="ghost" id="btn-theme" title="切换深浅色">🌓</button>
+    </div>
+  </aside>
 
-    <div class="card">
-      <h3>导入 mimo.json（多账号）</h3>
-      <p class="dim">粘贴 cpa 插件格式的凭证 JSON（<code>{"type":"mimo","pass_token":"…","user_id":"…"}</code>），或选择文件：</p>
-      <textarea id="import-text" rows="5" placeholder='{"type":"mimo","pass_token":"…","user_id":"…"}'></textarea>
-      <div class="row-actions">
-        <input type="file" id="import-file" accept=".json">
-        <button id="btn-import" class="primary">导入</button>
-        <span id="import-out" class="dim"></span>
+  <main class="main">
+    <div class="top">
+      <div>
+        <h1 id="page-title">仪表盘</h1>
+        <div class="sub" id="page-sub">服务、账号池与额度的总览</div>
+      </div>
+      <div class="row-actions" style="margin:0">
+        <button id="btn-extract-top">从本机提取凭证</button>
+        <button id="btn-global-refresh" class="primary">刷新数据</button>
       </div>
     </div>
 
-    <h2>账号列表</h2>
-    <table class="list" id="accounts-table">
-      <thead><tr><th>账号</th><th>凭证</th><th>来源</th><th>池统计</th><th>状态</th><th>操作</th></tr></thead>
-      <tbody></tbody>
-    </table>
-  </section>
+    <!-- 仪表盘 -->
+    <section id="view-dashboard" class="view">
+      <div class="grid g4" id="kpis">
+        <div class="card kpi"><div class="k-glow"></div><div class="k-head"><span>账号总数</span><span class="k-ic">👥</span></div><div class="k-val" id="k-accounts">—</div><div class="k-sub" id="k-accounts-sub">data/accounts/</div></div>
+        <div class="card kpi"><div class="k-glow"></div><div class="k-head"><span>今日请求</span><span class="k-ic">⚡</span></div><div class="k-val" id="k-today">—</div><div class="k-sub" id="k-today-sub">转发侧统计</div></div>
+        <div class="card kpi"><div class="k-glow"></div><div class="k-head"><span>平均剩余额度</span><span class="k-ic">◔</span></div><div class="k-val" id="k-quota">—</div><div class="k-sub" id="k-quota-sub">点击「刷新数据」更新</div></div>
+        <div class="card kpi"><div class="k-glow"></div><div class="k-head"><span>服务状态</span><span class="k-ic">♥</span></div><div class="k-val" id="k-svc">—</div><div class="k-sub" id="k-svc-sub">—</div></div>
+      </div>
 
-  <!-- 额度 -->
-  <section id="tab-quota" class="tab hidden">
-    <div class="row-actions">
-      <button id="btn-quota-refresh" class="primary">刷新额度</button>
-      <label>自动轮询
-        <select id="poll-select">
-          <option value="0">关闭</option>
-          <option value="30">30 秒</option>
-          <option value="60" selected>60 秒</option>
-          <option value="120">120 秒</option>
-        </select>
-      </label>
-      <span id="quota-observed" class="dim"></span>
-    </div>
-    <div class="cards" id="quota-cards"></div>
-  </section>
+      <div class="grid g2" style="margin-top:14px">
+        <div class="card">
+          <h3>额度趋势</h3>
+          <div class="chart-wrap" id="chart-quota"></div>
+          <div class="legend"><span><i style="background:var(--primary)"></i>当前转发会话</span><span><i style="background:var(--primary-2)"></i>账号池</span></div>
+        </div>
+        <div class="card">
+          <h3>近 30 天请求量</h3>
+          <div class="chart-wrap" id="chart-daily"></div>
+          <div class="legend"><span><i style="background:var(--primary)"></i>成功</span><span><i style="background:var(--bad)"></i>错误</span></div>
+        </div>
+      </div>
 
-  <!-- 设置 -->
-  <section id="tab-settings" class="tab hidden">
-    <div class="cards" id="settings-cards"></div>
-  </section>
-</main>
+      <div class="grid g2" style="margin-top:14px">
+        <div class="card"><h3>账号池</h3><div id="dash-pool"><span class="dim">加载中…</span></div></div>
+        <div class="card"><h3>快捷操作</h3>
+          <div class="row-actions">
+            <button id="btn-dash-extract" class="primary">从本机 MiMo 客户端提取</button>
+            <button onclick="location.hash='#/creds'">导入 mimo.json</button>
+            <button onclick="location.hash='#/quota'">查看额度</button>
+          </div>
+          <p class="dim">额度随「刷新数据」/额度页自动轮询积累（10 分钟节流入图）。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 凭证与账号 -->
+    <section id="view-creds" class="view hidden">
+      <div class="card">
+        <h3>从本机 MiMo 客户端提取</h3>
+        <p class="dim">复制客户端 Cookies → 读 passToken/userId → SSO 换 serviceToken → 落盘（含账号池）。</p>
+        <div class="row-actions"><button id="btn-extract" class="primary">一键提取</button></div>
+        <div id="extract-out" class="mono dim" style="white-space:pre-wrap;font-size:12px"></div>
+      </div>
+      <div class="card" style="margin-top:14px">
+        <h3>导入 mimo.json（多账号）</h3>
+        <p class="dim">粘贴 cpa 插件格式凭证 JSON，或选择文件：</p>
+        <textarea id="import-text" rows="4" placeholder='{"type":"mimo","pass_token":"…","user_id":"…"}'></textarea>
+        <div class="row-actions">
+          <input type="file" id="import-file" accept=".json">
+          <button id="btn-import" class="primary">导入</button>
+          <span id="import-out" class="dim"></span>
+        </div>
+      </div>
+      <div class="card" style="margin-top:14px">
+        <h3>账号列表</h3>
+        <table class="list" id="accounts-table">
+          <thead><tr><th>账号</th><th>凭证</th><th>来源</th><th>池统计</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 额度 -->
+    <section id="view-quota" class="view hidden">
+      <div class="row-actions">
+        <button id="btn-quota-refresh" class="primary">刷新额度</button>
+        <label>自动轮询
+          <select id="poll-select">
+            <option value="0">关闭</option>
+            <option value="30">30 秒</option>
+            <option value="60" selected>60 秒</option>
+            <option value="120">120 秒</option>
+          </select>
+        </label>
+        <span id="quota-observed" class="dim"></span>
+      </div>
+      <div class="grid g4" id="quota-cards"></div>
+    </section>
+
+    <!-- 设置 -->
+    <section id="view-settings" class="view hidden">
+      <div class="grid g2" id="settings-cards"></div>
+    </section>
+  </main>
+</div>
 
 <!-- 管理密钥登录 -->
 <div id="login" class="overlay hidden">
-  <div class="login-card">
+  <div class="card login-card">
     <h2>管理密钥</h2>
     <p class="dim">首次使用请输入管理密钥（见 <code>data/admin-key.txt</code> 或服务启动日志）。</p>
     <input type="password" id="key-input" placeholder="xm2api-…" autocomplete="off">
     <div class="row-actions">
-      <button id="btn-login" class="primary">进入</button>
+      <button id="btn-login" class="primary">进入控制台</button>
       <span id="login-err" class="bad"></span>
     </div>
   </div>

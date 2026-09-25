@@ -45,6 +45,7 @@ import {
   routeCookie,
 } from "./lib/accounts.mjs";
 import { credentialsStatus, ensureCredentials } from "./lib/pipeline.mjs";
+import { recordUsageSnapshot, usageHistory, usageDaily, recordRequest } from "./lib/usage.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = __dirname;
@@ -192,8 +193,9 @@ async function on401({ status, headers }) {
   }
 }
 
-/** 池统计：每次上游响应记成功/失败（401/403 的失败在 on401 里已记过）。 */
+/** 池统计 + 每日请求计数（图表数据层）：每次上游响应记一次。 */
 function onResult({ status, headers }) {
+  recordRequest(status < 400);
   const used = usedCred.get(headers);
   if (!used || used.kind !== "account") return;
   if (status < 400) reportSuccess(used.id);
@@ -608,6 +610,7 @@ async function adminQuota(req, res) {
       const acc = readAccount(s.id);
       try {
         const u = await fetchUsage(acc);
+        recordUsageSnapshot(s.id, u.percent, u.resetDate); // 图表数据层（10 分钟节流）
         return { id: s.id, label: s.label, ok: true, ...u };
       } catch (e) {
         return { id: s.id, label: s.label, ok: false, error: String(e.message || e) };
@@ -617,11 +620,23 @@ async function adminQuota(req, res) {
   let session = null;
   try {
     const u = await fetchSessionUsage();
-    if (u) session = { ok: true, ...u };
+    if (u) {
+      recordUsageSnapshot("session", u.percent, u.resetDate);
+      session = { ok: true, ...u };
+    }
   } catch (e) {
     session = { ok: false, error: String(e.message || e) };
   }
   sendJson(res, 200, { session, accounts: results, observed_at: new Date().toISOString() });
+}
+
+function adminUsageHistory(req, res) {
+  sendJson(res, 200, { history: usageHistory() });
+}
+
+function adminUsageDaily(req, res) {
+  const days = Math.max(1, Math.min(90, Number(/days=(\d+)/.exec(req.url || "")?.[1]) || 30));
+  sendJson(res, 200, { daily: usageDaily(days), days });
 }
 
 /* ------------------------------------------------ 服务 */
@@ -651,6 +666,8 @@ const routeServer = createRouteServer({
     { method: "PATCH", path: /^\/api\/__admin\/accounts\/[^/]+$/, handler: withAdmin(adminAccountsPatch) },
     { method: "DELETE", path: /^\/api\/__admin\/accounts\/[^/]+$/, handler: withAdmin(adminAccountsDelete) },
     { method: "GET", path: "/api/__admin/quota", handler: withAdmin(adminQuota) },
+    { method: "GET", path: "/api/__admin/usage/history", handler: withAdmin(adminUsageHistory) },
+    { method: "GET", path: /^\/api\/__admin\/usage\/daily$/, handler: withAdmin(adminUsageDaily) },
     {
       method: "GET",
       path: "/v1/models",
