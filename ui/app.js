@@ -197,6 +197,138 @@ async function renderDashboard() {
     : '<span class="dim">账号池为空 —— 用「一键提取」或凭证页导入 mimo.json</span>';
 }
 
+/* ------------------------------------------------ 在线登录（三期：扫码 / 密码 / OTP） */
+
+let qrPollTimer = null;
+let otpSessionId = null;
+let lastPw = null; // 仅内存：为「重新发码」暂存，绝不持久化
+
+$("#btn-tab-qr").addEventListener("click", () => {
+  $("#box-qr").classList.remove("hidden");
+  $("#box-pw").classList.add("hidden");
+  $("#btn-tab-qr").classList.add("primary");
+  $("#btn-tab-pw").classList.remove("primary");
+});
+$("#btn-tab-pw").addEventListener("click", () => {
+  $("#box-pw").classList.remove("hidden");
+  $("#box-qr").classList.add("hidden");
+  $("#btn-tab-pw").classList.add("primary");
+  $("#btn-tab-qr").classList.remove("primary");
+});
+
+function qrRender(r) {
+  // 只在拿到新 qr 时替换图片 —— 轮询回调只带状态文案，别把已渲染的二维码清掉
+  if (r.qr) {
+    $("#qr-img-box").innerHTML =
+      `<img src="${r.qr}" alt="登录二维码" style="width:220px;height:220px;border-radius:12px;border:1px solid var(--border)">`;
+  }
+  if (r.message !== undefined) $("#qr-status").textContent = r.message || "";
+}
+
+$("#btn-qr-start").addEventListener("click", async () => {
+  try {
+    const r = await api("POST", "/login/qr/start");
+    qrRender(r);
+    if (qrPollTimer) clearInterval(qrPollTimer);
+    qrPollTimer = setInterval(async () => {
+      try {
+        const s = await api("GET", "/login/qr/status?id=" + encodeURIComponent(r.id));
+        qrRender(s);
+        if (s.status !== "pending") {
+          clearInterval(qrPollTimer);
+          qrPollTimer = null;
+          if (s.status === "confirmed") {
+            $("#qr-status").innerHTML = '<span class="ok">✅ ' + esc(s.message) + "</span>";
+            await renderAccounts();
+          } else {
+            $("#qr-status").innerHTML = '<span class="bad">' + esc(s.message) + "</span>";
+          }
+        }
+      } catch (e) {
+        $("#qr-status").textContent = "轮询失败：" + e.message;
+      }
+    }, 3000);
+  } catch (e) {
+    $("#qr-status").textContent = "❌ " + e.message;
+  }
+});
+
+async function doPasswordLogin() {
+  const user = $("#pw-user").value.trim();
+  const password = $("#pw-pass").value;
+  if (!user || !password) {
+    $("#pw-out").textContent = "账号和密码都要填";
+    return;
+  }
+  $("#btn-pw-login").disabled = true;
+  $("#pw-out").textContent = "登录中…";
+  try {
+    const r = await api("POST", "/login/password", { user, password });
+    if (r.status === "ok") {
+      $("#pw-out").innerHTML = '<span class="ok">✅ 登录成功，凭证已入库</span>';
+      $("#box-otp").classList.add("hidden");
+      $("#pw-pass").value = "";
+      lastPw = null;
+      await renderAccounts();
+    } else if (r.status === "awaiting-otp") {
+      lastPw = { user, password }; // 仅内存，供「重新发码」
+      otpSessionId = r.id;
+      $("#pw-out").innerHTML = '<span class="ok">已发送验证码</span>';
+      $("#otp-notify").textContent = `验证码已发至 ${r.notify || "你的验证方式"}（${r.method === "Email" ? "邮箱" : "短信"}）`;
+      $("#box-otp").classList.remove("hidden");
+    } else {
+      $("#pw-out").innerHTML = '<span class="bad">❌ ' + esc(r.message || "登录失败") + "</span>"
+        + (r.captchaUrl ? ` <a href="${esc(r.captchaUrl)}" target="_blank">完成人机验证</a>` : "");
+    }
+  } catch (e) {
+    $("#pw-out").innerHTML = '<span class="bad">❌ ' + esc(e.message) + "</span>";
+  } finally {
+    $("#btn-pw-login").disabled = false;
+  }
+}
+$("#btn-pw-login").addEventListener("click", doPasswordLogin);
+$("#pw-pass").addEventListener("keydown", (e) => { if (e.key === "Enter") doPasswordLogin(); });
+
+$("#btn-otp-submit").addEventListener("click", async () => {
+  const code = $("#otp-code").value.trim();
+  if (!code || !otpSessionId) return;
+  $("#btn-otp-submit").disabled = true;
+  try {
+    const r = await api("POST", "/login/otp", { id: otpSessionId, code });
+    if (r.ok) {
+      $("#pw-out").innerHTML = '<span class="ok">✅ 验证通过，凭证已入库</span>';
+      $("#box-otp").classList.add("hidden");
+      $("#pw-pass").value = "";
+      lastPw = null;
+      await renderAccounts();
+    } else {
+      $("#otp-notify").innerHTML = '<span class="bad">' + esc(r.message || "验证失败") + "</span>";
+    }
+  } catch (e) {
+    $("#otp-notify").innerHTML = '<span class="bad">' + esc(e.message) + "</span>";
+  } finally {
+    $("#btn-otp-submit").disabled = false;
+  }
+});
+
+$("#btn-otp-resend").addEventListener("click", async () => {
+  if (!lastPw) return;
+  $("#btn-otp-resend").disabled = true;
+  try {
+    const r = await api("POST", "/login/password", lastPw);
+    if (r.status === "awaiting-otp") {
+      otpSessionId = r.id;
+      $("#otp-notify").textContent = `验证码已重新发至 ${r.notify || "你的验证方式"}`;
+    } else {
+      $("#otp-notify").textContent = "重新发码失败：" + (r.message || r.status);
+    }
+  } catch (e) {
+    $("#otp-notify").textContent = "重新发码失败：" + e.message;
+  } finally {
+    $("#btn-otp-resend").disabled = false;
+  }
+});
+
 /* ------------------------------------------------ 凭证与账号 */
 
 async function renderAccounts() {

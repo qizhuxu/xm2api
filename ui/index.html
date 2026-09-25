@@ -83,6 +83,37 @@
     <!-- 凭证与账号 -->
     <section id="view-creds" class="view hidden">
       <div class="card">
+        <h3>在线登录小米账号</h3>
+        <div class="row-actions">
+          <button id="btn-tab-qr" class="primary">扫码登录</button>
+          <button id="btn-tab-pw">密码登录</button>
+          <span class="dim">密码/验证码只在本机内存中流转，不落盘不进日志</span>
+        </div>
+        <div id="box-qr">
+          <div class="row-actions">
+            <button id="btn-qr-start" class="primary">生成登录二维码</button>
+            <span id="qr-status" class="dim">用小米手机（设置 → 小米账号）扫码确认</span>
+          </div>
+          <div id="qr-img-box"></div>
+        </div>
+        <div id="box-pw" class="hidden">
+          <input type="text" id="pw-user" placeholder="小米账号（手机号 / 邮箱）" style="width:100%;margin:6px 0">
+          <input type="password" id="pw-pass" placeholder="密码" style="width:100%;margin:6px 0">
+          <div class="row-actions">
+            <button id="btn-pw-login" class="primary">登录</button>
+            <span id="pw-out" class="dim"></span>
+          </div>
+          <div id="box-otp" class="hidden">
+            <p class="dim" id="otp-notify">验证码已发送</p>
+            <input type="text" id="otp-code" placeholder="输入验证码" style="width:220px">
+            <div class="row-actions">
+              <button id="btn-otp-submit" class="primary">提交验证码</button>
+              <button id="btn-otp-resend">重新发码</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:14px">
         <h3>从本机 MiMo 客户端提取</h3>
         <p class="dim">复制客户端 Cookies → 读 passToken/userId → SSO 换 serviceToken → 落盘（含账号池）。</p>
         <div class="row-actions"><button id="btn-extract" class="primary">一键提取</button></div>

@@ -46,6 +46,7 @@ import {
 } from "./lib/accounts.mjs";
 import { credentialsStatus, ensureCredentials } from "./lib/pipeline.mjs";
 import { recordUsageSnapshot, usageHistory, usageDaily, recordRequest } from "./lib/usage.mjs";
+import { qrStart, qrStatus, passwordLogin, otpSubmit, otpStatus } from "./lib/login.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = __dirname;
@@ -639,6 +640,48 @@ function adminUsageDaily(req, res) {
   sendJson(res, 200, { daily: usageDaily(days), days });
 }
 
+/* ---- 在线登录（三期）：扫码 / 密码 / 新设备 OTP。
+   ⚠️ 密码与验证码只在 lib/login.mjs 内存中流转：不打日志、不进错误消息、不落盘。 */
+
+async function adminLoginQrStart(req, res) {
+  const r = await qrStart();
+  if (!r.ok) {
+    sendJson(res, 502, { error: { message: r.error, type: "upstream_error" } });
+    return;
+  }
+  sendJson(res, 200, r);
+}
+
+function adminLoginQrStatus(req, res) {
+  const id = /id=([^&]+)/.exec(req.url || "")?.[1] || "";
+  const r = qrStatus(decodeURIComponent(id));
+  sendJson(res, r.ok ? 200 : 404, r.ok ? r : { error: { message: r.error, type: "invalid_request_error", code: "not_found" } });
+}
+
+async function adminLoginPassword(req, res) {
+  let j = {};
+  try {
+    j = JSON.parse((await readBody(req)).toString("utf8") || "{}");
+  } catch {}
+  const r = await passwordLogin({ user: j.user, password: j.password });
+  sendJson(res, 200, r);
+}
+
+async function adminLoginOtp(req, res) {
+  let j = {};
+  try {
+    j = JSON.parse((await readBody(req)).toString("utf8") || "{}");
+  } catch {}
+  const r = await otpSubmit(j.id, j.code);
+  sendJson(res, 200, r);
+}
+
+function adminLoginOtpStatus(req, res) {
+  const id = /id=([^&]+)/.exec(req.url || "")?.[1] || "";
+  const r = otpStatus(decodeURIComponent(id));
+  sendJson(res, r.ok ? 200 : 404, r.ok ? r : { error: { message: r.error, type: "invalid_request_error", code: "not_found" } });
+}
+
 /* ------------------------------------------------ 服务 */
 
 const routeServer = createRouteServer({
@@ -668,6 +711,11 @@ const routeServer = createRouteServer({
     { method: "GET", path: "/api/__admin/quota", handler: withAdmin(adminQuota) },
     { method: "GET", path: "/api/__admin/usage/history", handler: withAdmin(adminUsageHistory) },
     { method: "GET", path: /^\/api\/__admin\/usage\/daily$/, handler: withAdmin(adminUsageDaily) },
+    { method: "POST", path: "/api/__admin/login/qr/start", handler: withAdmin(adminLoginQrStart) },
+    { method: "GET", path: /^\/api\/__admin\/login\/qr\/status$/, handler: withAdmin(adminLoginQrStatus) },
+    { method: "POST", path: "/api/__admin/login/password", handler: withAdmin(adminLoginPassword) },
+    { method: "POST", path: "/api/__admin/login/otp", handler: withAdmin(adminLoginOtp) },
+    { method: "GET", path: /^\/api\/__admin\/login\/otp\/status$/, handler: withAdmin(adminLoginOtpStatus) },
     {
       method: "GET",
       path: "/v1/models",
