@@ -114,7 +114,8 @@ jobs:
           set -euo pipefail
           cd artifacts
           ls -l
-          sha256sum ./*.zip > checksums.txt
+          # 不带 ./ 前缀：官方商店校验按 <sha256>  <zip名> 匹配文件名
+          sha256sum *.zip > checksums.txt
           cat checksums.txt
 
       - uses: softprops/action-gh-release@v2
