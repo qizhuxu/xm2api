@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -159,6 +160,10 @@ func applyExclusions(list []modelInfo) []modelInfo {
 	return out
 }
 
+// errUnauthorized 上游 401 的哨兵错误：模型拉取据此触发反应式续期重试
+// （与 fetchUsage 同款自救）。
+var errUnauthorized = errors.New("上游拒绝（401）")
+
 func fetchUpstreamModels(cookie string) ([]upstreamModel, error) {
 	url := config().BaseURL + "/api/model/list"
 	req, err := http.NewRequest(http.MethodGet, url, nil)
@@ -180,7 +185,11 @@ func fetchUpstreamModels(cookie string) ([]upstreamModel, error) {
 		return nil, err
 	}
 	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d: %.200s", res.StatusCode, string(body))
+		e := fmt.Errorf("HTTP %d: %.200s", res.StatusCode, string(body))
+		if res.StatusCode == http.StatusUnauthorized {
+			return nil, fmt.Errorf("%w: %v", errUnauthorized, e)
+		}
+		return nil, e
 	}
 	var parsed struct {
 		Code    *int   `json:"code"`
@@ -281,9 +290,18 @@ func toInfos(list []upstreamModel) []modelInfo {
 	return out
 }
 
+// renewForModels 测试接缝：指向与 chat/图像路径共用的反应式续期
+// （renewServiceToken —— 续期逻辑只允许有一份）。测试里换成桩件。
+var renewForModels = renewServiceToken
+
 // resolveModels 按「内存缓存 → 上游 → 磁盘缓存 → 硬编码兜底」的顺序取模型清单。
 // 第三个返回值是「上游为什么没拿到」，供状态页显示。
-func resolveModels(cookie string) ([]modelInfo, string, error) {
+//
+// authID/cred 非空时带上反应式自救：上游 401 且有 pass_token ⇒ 续期后重试一次
+// （与 fetchUsage 同款）。模型路径此前缺这条 —— 凭证文件里的旧 serviceToken
+// 过期后，目录会永远停在兜底两个模型（Linux 服务器实测），而续期早把 token
+// 救回来了，模型路径却还在用文件里的旧值。
+func resolveModels(authID string, cred mimoCred, cookie string) ([]modelInfo, string, error) {
 	// ⚠️ modelTTL() 内部会走 config() → mu.RLock()，而 sync.RWMutex 不可重入。
 	// 必须在拿写锁**之前**算好 TTL，否则一旦持锁再调 config() 就是永久死锁。
 	ttl := modelTTL()
@@ -310,6 +328,12 @@ func resolveModels(cookie string) ([]modelInfo, string, error) {
 	}
 
 	list, err := fetchUpstreamModels(cookie)
+	if err != nil && errors.Is(err, errUnauthorized) && authID != "" && cred.PassToken != "" {
+		if rerr := renewForModels(authID, &cred); rerr == nil {
+			cookie = cred.routeCookie()
+			list, err = fetchUpstreamModels(cookie)
+		}
+	}
 	if err == nil {
 		if out := toInfos(list); len(out) > 0 {
 			mu.Lock()
@@ -338,6 +362,8 @@ func resolveModels(cookie string) ([]modelInfo, string, error) {
 // 只能吃缓存或兜底清单。两者返回同一个 catalog，保证模型名一致。
 func handleModels(method string, req []byte) []byte {
 	cookie := ""
+	var authID string
+	var cred mimoCred
 	if method == methodModelForAuth {
 		var in struct {
 			AuthID       string `json:"AuthID"`
@@ -348,12 +374,21 @@ func handleModels(method string, req []byte) []byte {
 			var c mimoCred
 			if json.Unmarshal(in.StorageJSON, &c) == nil {
 				c.normalize()
-				cookie = c.routeCookie()
+				cred = c
+				authID = in.AuthID
 			}
 		}
+		// 内存优先（v0.2.0）：反应式续期拿到的新 serviceToken 只在 credStore 里，
+		// 凭证文件还是旧值 —— 用文件的旧 token 拉目录必然 401、落到兜底两个模型。
+		if authID != "" {
+			if fresh := credById(authID); fresh.ServiceToken != "" || fresh.PassToken != "" {
+				cred = fresh
+			}
+		}
+		cookie = cred.routeCookie()
 	}
 
-	models, source, mErr := resolveModels(cookie)
+	models, source, mErr := resolveModels(authID, cred, cookie)
 	// 过滤放在这里而不是缓存里：改了 exclude_models 立刻生效，不用等缓存过期
 	models = applyExclusions(models)
 	recordModels(source, len(models), mErr)

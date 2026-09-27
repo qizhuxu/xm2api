@@ -180,6 +180,22 @@ func rememberCred(authID string, c mimoCred) {
 	updateCred(authID, func(s *credState) { s.full = c })
 }
 
+// credById 精确按 AuthID 取内存凭证，不做单凭证兜底 —— 兜底会拿错账号的
+// token 去拉目录甚至触发错号续期。返回值已 normalize。
+func credById(authID string) mimoCred {
+	credStore.Lock()
+	var out mimoCred
+	if s := credStore.m[authID]; s != nil {
+		out = s.full
+		if s.tok != "" {
+			out.ServiceToken = s.tok
+		}
+	}
+	credStore.Unlock()
+	out.normalize()
+	return out
+}
+
 // credForLookup 按 AuthID 取插件已知凭证，token 优先用缓存里最新的。
 // 宿主的 QuotaFetchRequest 只带 AuthID/Metadata，不带 StorageJSON，
 // quota.fetch 只能靠这条路径拿凭证。
