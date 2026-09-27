@@ -97,7 +97,7 @@ print(json.load(urllib.request.urlopen(req))["choices"][0]["message"]["content"]
 | `POST /v1/audio/speech` | 上游有此路径但**未配供应商**（401），TTS 请走 chat/completions |
 | `POST /v1/audio/transcriptions` | 同上，ASR 请走 chat/completions |
 | `POST /route/chat/completions` | 聊天旧路径 |
-| `GET /v1/models` | **从上游 `/api/model/list` 实时拉取**（缓存 5 分钟，带 `capabilities` / `price`） |
+| `GET /v1/models` | **从上游 `/api/model/list` 实时拉取**（缓存 5 分钟，带 `capabilities` / `price` / `context_length`） |
 | `GET /v1/models/{id}` | 单个模型；不存在时 404 并列出全部可用 id |
 | `GET /usage` | 账号使用量（上游 `/api/user/usage`） |
 | `GET /ui/` | **管理界面**（静态单页：状态/凭证/额度/设置，见 [docs/ui-admin.md](docs/ui-admin.md)） |
@@ -201,6 +201,19 @@ python examples/all-models.py            # 列模型 + 聊天 + TTS + ASR 闭环
 python examples/all-models.py --all-tts   # 再加 voicedesign / voiceclone
 python examples/all-models.py --image     # 再加图像生成（计费 ¥0.21）
 ```
+
+### 容量声明：mimo-v2.6 系列自带 1M 上下文
+
+`/v1/models` 每条响应按型号前缀标注容量（`server.mjs` 的 `CAPACITY_BY_PREFIX`）：
+
+| 字段 | 值 | 适用 |
+|---|---|---|
+| `context_length` | `1048576`（1M） | `mimo-v2.6-*`（前缀匹配） |
+
+数值是官方规格（llm-stats / Artificial Analysis 双源核对），不是猜的；其他型号不带容量字段，
+最大输出上限官方无公开数字，也一律不声明。用途：DSH / Cherry Studio 等客户端从
+`/v1/models` 自动读到上下文上限，免手工填（DSH 的发现解析还认 `context_window` /
+`max_input_tokens` 等别名；`context_length` 是 OpenRouter 惯例，兼容面最广）。
 
 ### 推理等级：上游没有这个旋钮，客户端不显示是对的
 

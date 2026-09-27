@@ -226,6 +226,24 @@ const TYPE_CAPS = {
   ASR: { api: "/v1/chat/completions", capabilities: ["transcription"], via: "chat/completions + input_audio" },
 };
 
+/**
+ * 模型容量声明（按型号前缀）：让客户端从 GET /v1/models 自动读到上下文上限，
+ * 不用手工填。DSH 的发现解析认 contextWindow / context_window / context_length /
+ * max_input_tokens 等别名，Cherry Studio 等读 context_length（OpenRouter 惯例），
+ * 所以统一用 context_length，兼容面最广。
+ * 数值不是猜的：MiMo-V2.6 系列官方 1M 上下文（llm-stats / Artificial Analysis
+ * 双源核对，与 DSH 内置目录里 V2.5 系列的 1048576 同值）。
+ * 没列出的型号一律不带容量字段；最大输出上限官方无公开数字，也一律不声明（不猜）。
+ */
+const CAPACITY_BY_PREFIX = [
+  { prefix: "mimo-v2.6", context_length: 1048576 },
+];
+
+function capacityOf(name) {
+  const hit = CAPACITY_BY_PREFIX.find((c) => String(name || "").startsWith(c.prefix));
+  return hit ? { context_length: hit.context_length } : {};
+}
+
 function toOpenAiModel(m) {
   const type = String(m.modelType || "").toUpperCase();
   const caps = TYPE_CAPS[type] || {};
@@ -243,6 +261,9 @@ function toOpenAiModel(m) {
     capabilities: caps.capabilities,
     api: caps.api,
     via: caps.via,
+    // 反代补充：官方容量声明（按型号前缀，见 CAPACITY_BY_PREFIX），
+    // DSH / Cherry Studio 等客户端从 /v1/models 自动读取上下文上限
+    ...capacityOf(m.modelName),
     // 推理等级实测：上游根本没实现——low/high 无差异、none 关不掉思考、
     // 非法值（banana/xhigh）照样 200，链路上没人校验。客户端不显示等级选择器是正常的，
     // 详见 README「推理等级」一节
