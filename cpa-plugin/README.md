@@ -62,6 +62,57 @@ go build -buildmode=c-shared -trimpath -ldflags "-s -w" -o dist/mimo.dll .
     └── mimo.json         ← 凭证
 ```
 
+### 2.2.1 Docker 部署的 CPA（Linux 服务器）
+
+官方 Docker 镜像（`eceasy/cli-proxy-api`，基于 `debian:bookworm`）与本插件的
+glibc 构建**完全兼容**（发布资产 `mimo.so` 最高只要求 `GLIBC_2.34`，bookworm 是
+2.36，实测符号版本核对通过）。接入步骤：
+
+1. **取对架构的资产**（`uname -m`：`x86_64` → `amd64`，`aarch64` → `arm64`）：
+
+   ```bash
+   wget https://github.com/qizhuxu/xm2api/releases/download/v0.1.0/mimo_0.1.0_linux_amd64.zip
+   mkdir -p plugins && unzip mimo_0.1.0_linux_amd64.zip -d plugins/   # → plugins/mimo.so
+   ```
+
+2. **挂载三个目录**（官方文档明确要求：插件目录必须挂载，否则重启后丢失）：
+
+   ```yaml
+   services:
+     cliproxyapi:
+       image: eceasy/cli-proxy-api:latest
+       ports: ["8317:8317"]
+       volumes:
+         - ./config.yaml:/CLIProxyAPI/config.yaml
+         - ./auth:/root/.cli-proxy-api          # 凭证目录（auth-dir）
+         - ./plugins:/CLIProxyAPI/plugins       # ← mimo.so 放宿主机 plugins/
+       restart: unless-stopped
+   ```
+
+3. **config.yaml 开插件**（同 §2.3）：`plugins.enabled: true` + `plugins.configs.mimo.enabled: true`，然后 `docker compose up -d`；
+
+4. **灌凭证**（二选一，同 §12）：
+   - 方案一：Windows 本机 `npm run cpa-auth` 导出 `mimo.json` → `scp` 到 `auth/mimo.json`；
+   - 方案二：管理面板在线登录 —— `http://<server>:8317/management.html#/oauth` 的「SSO 登录」
+     （扫码 / 账号密码 / 新设备 OTP），凭证由插件自动写进 `auth/`；
+
+5. **验证**：
+
+   ```bash
+   curl -H "X-Management-Key: <key>" http://127.0.0.1:8317/v0/management/plugins
+   # 期望 registered: true、effective_enabled: true
+   curl http://127.0.0.1:8317/v1/models -H "Authorization: Bearer <downstream-key>"
+   ```
+
+   面板里也能直接看：`#/plugins` 一行插件卡片、`#/auth-files` 凭证与用量 label。
+
+⚠️ **兼容性边界**：发布资产是 **glibc** 构建（CGO），仅适用于 Debian/Ubuntu 系镜像。
+**Alpine（musl）镜像加载不了**（缺 `libc.so.6`）——要么换 Debian 系基础镜像，
+要么在 alpine 环境里 `make build` 自建 musl 版 `mimo.so` 手动放 `plugins/`。
+
+**升级**：下载新版 zip 覆盖宿主机 `plugins/mimo.so` → `docker compose restart`
+（Windows 上无此问题；Linux 上宿主机文件未被锁，直接覆盖重启即可）。
+
 ### 2.3 配置
 
 ```yaml
@@ -631,6 +682,8 @@ CPA 升级后需重验。不想用图像时依旧可用 `exclude_models: ["Douba
 卡片暂不渲染插件配额，见第 10 节。）
 
 ## 12. Linux 部署：凭证获取
+
+> 完整的 Docker（容器化 CPA）接入步骤见 §2.2.1；本节聚焦**凭证怎么弄到服务器上**。
 
 CPA + `mimo.so` 部署到 Linux 后没有 MiMo 客户端、没有 Chromium Cookie 库，
 凭证获取有两条路（详细逆向报告见仓库 `investigation-mimo-auth-report.md`）。
