@@ -7,9 +7,9 @@ VERSION   ?= 0.1.0
 GOOS      ?= $(shell go env GOOS)
 GOARCH    ?= $(shell go env GOARCH)
 # 插件元数据里的仓库地址（官方插件商店 registry 要求 github.com/{owner}/{repo}）；
-# CI 用 -X main.pluginRepo=https://github.com/<owner>/<repo> 注入真实值，
-# 本地构建可用 make build PLUGIN_REPO=... 覆盖占位值
-PLUGIN_REPO ?= https://github.com/your-org/xm2api
+# CI 仍用 -X main.pluginRepo=https://github.com/<owner>/<repo> 注入当前仓库值，
+# 本地构建可用 make build PLUGIN_REPO=... 覆盖
+PLUGIN_REPO ?= https://github.com/qizhuxu/xm2api
 
 # 动态库后缀按平台走，与 CPA loader 的约定一致
 EXT_linux   := so

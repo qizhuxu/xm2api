@@ -391,9 +391,9 @@ $env:MIMO_PLUGIN_DEBUG = "1"    # 启动 CPA 前设置
    ```
 
    版本以 **release tag** 为准（可带 `v`，宿主安装时去掉前导 `v` 校验）；
-3. **元数据注入**：CI 用 `-X main.pluginRepo=https://github.com/<owner>/<repo>` 写入
-   `plugin.register` 的 `GitHubRepository`；本地构建用
-   `make build PLUGIN_REPO=https://github.com/you/your-repo` 覆盖占位值；
+3. **元数据注入**：CI 用 `-X main.pluginRepo=https://github.com/qizhuxu/xm2api` 写入
+   `plugin.register` 的 `GitHubRepository`（本地构建默认即真值，可用
+   `make build PLUGIN_REPO=...` 覆盖）；
 4. **提交官方插件商店**：给
    [router-for-me/CLIProxyAPI-Plugins-Store](https://github.com/router-for-me/CLIProxyAPI-Plugins-Store)
    的 `registry.json` 提 PR（`id/name/description/author/repository` 必填）：
@@ -405,7 +405,7 @@ $env:MIMO_PLUGIN_DEBUG = "1"    # 启动 CPA 前设置
      "description": "把小米 MiMo SSO 会话接入 CLIProxyAPI：模型发现、凭证续期、聊天/图像执行。",
      "author": "xm2api",
      "version": "0.2.0",
-     "repository": "https://github.com/<owner>/<repo>",
+     "repository": "https://github.com/qizhuxu/xm2api",
      "logo": "",
      "license": "MIT",
      "tags": ["provider"]
@@ -573,6 +573,7 @@ CPA 升级后需重验。不想用图像时依旧可用 `exclude_models: ["Douba
      `test/panel/panel-v75-verify.mjs`（开关联动回归，未被 v7.6 破坏）。
      验证脚本：`test/panel/panel-v75-verify.mjs`（上述三个问题逐条断言，
      含「不刷新页面」的开关联动）与 `test/panel/panel-quota-probe3.mjs`。
+     （测试脚本属开发资料，不随公开仓库发布。）
   其余实时位置：`POST /v0/management/quota/fetch`（curl/脚本）与
   `GET /v0/management/plugins/mimo/status`（状态 JSON `usage` 字段）。
 

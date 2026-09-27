@@ -25,6 +25,11 @@ __pycache__/
 *.log
 .DS_Store
 
+# 开发资料：不入公开仓库（本地保留；公开仓库只留构建/运行必要源码与必要文档）
+AGENT.md
+test/
+docs/investigation-*.md
+
 # 测试运行产物（截图 / 探针输出，跑 test/ 下脚本时生成）
 test/output/
 test/shots/

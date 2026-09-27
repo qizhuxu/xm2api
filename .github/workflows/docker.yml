@@ -1,7 +1,7 @@
 # 构建并推送 xm2api Docker 镜像到 GHCR（GitHub 容器仓库）
 #
 # 触发：推送 v* tag（与插件 release 同节奏）或手动 workflow_dispatch。
-# 产物：ghcr.io/<owner>/<repo>:<version> / :<major.minor> / :latest
+# 产物：ghcr.io/qizhuxu/xm2api:<version> / :<major.minor> / :latest
 name: docker
 
 on:

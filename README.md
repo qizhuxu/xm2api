@@ -2,6 +2,10 @@
 
 把小米 MiMo 的 `mimo-server-cn` SSO 接口包成**标准 OpenAI 兼容入口**，跑在本机。
 
+> 仓库：[`github.com/qizhuxu/xm2api`](https://github.com/qizhuxu/xm2api) ｜
+> Docker 镜像：`ghcr.io/qizhuxu/xm2api` ｜
+> cpa 插件 Release：[`releases`](https://github.com/qizhuxu/xm2api/releases)（5 平台 zip + checksums）
+
 - **不需要 API Key** —— 用桌面客户端自己的账号会话
 - **不需要开客户端** —— 登录过一次就行（只有重新登录时才需要它）
 - **不改你的请求** —— 字节级透传，只注入一个 Cookie（[已验证](docs/architecture.md#6-自己验证反代没有篡改)）
@@ -463,18 +467,20 @@ docs/architecture.md    架构与数据流详解
 docs/tools-and-search.md 工具调用 / 联网搜索实测矩阵 + 踩坑
 docs/ui-admin.md       管理界面 / 管理 API / 安全护栏 说明
 ui/                    管理界面静态页（index.html / app.js / style.css）
-docs/investigation-mimo-auth-report.md 认证管线逆向调查报告
 cpa-plugin/             CLIProxyAPI 原生插件（线路2 的另一条走法，见下）
-test/
-  panel/                面板补丁验证/取证脚本（Playwright）
-  login/                登录 / 注册 / OTP 调研脚本
-  ui-smoke.mjs          管理界面 UI 冒烟
-  README.md             测试脚本说明与运行方法
-AGENT.md                代理工作规则（子代理 / 计划模式 / 目标模式 / 每轮提交）
 data/                   ⚠️ 凭证（gitignored）
 logs/                   ⚠️ 抓包日志（gitignored）
 jiu/                    归档区：非必要文件统一放这里（gitignored，见 jiu/README.md）
+
+—— 以下为本地开发资料，不随公开仓库发布（gitignored，克隆里没有）——
+test/                   测试 / 调研脚本（面板补丁验证、登录/注册调研、UI 冒烟）
+AGENT.md                代理工作规则（子代理 / 计划 / 目标 / 提交 / 文档同步）
+docs/investigation-mimo-auth-report.md 认证管线逆向调查报告
 ```
+
+> **公开仓库内容边界**：仓库只保留 Node 版 + cpa 插件版**构建/运行必要源码**与
+> **必要介绍文档**（见上表主区）；`test/`、`AGENT.md`、逆向调查报告等开发资料
+> 属内部工作产物，刻意不入公开仓库。
 
 `logs/path2-capture-<日期>.jsonl` 每请求一行：状态码、耗时、`x-trace-id`、
 脱敏请求头、`injected`、`rewrites`、请求/响应体（各上限 20KB）。
@@ -502,8 +508,8 @@ jiu/                    归档区：非必要文件统一放这里（gitignored�
 - 两者可并存：Node 反代继续负责凭证导出与本地调试，插件负责对外服务。
 
 详细的编译、部署、能力矩阵、面板 SSO 登录（扫码/账号密码）和开发踩坑见 [`cpa-plugin/README.md`](cpa-plugin/README.md)；
-Linux 部署的认证文件获取方案见其第 12 节（导出脚本 + 服务器侧登录双通道），逆向报告见
-[`investigation-mimo-auth-report.md`](investigation-mimo-auth-report.md)。
+Linux 部署的认证文件获取方案见其第 12 节（导出脚本 + 服务器侧登录双通道）。
+（更细的认证管线逆向调查报告属内部开发资料，不随公开仓库发布。）
 
 ---
 
@@ -572,7 +578,7 @@ docker compose up -d        # 或 docker build -t xm2api . 后按 Dockerfile 注
 ```
 
 - 镜像由 GitHub Actions 构建推送 GHCR（`.github/workflows/docker.yml`，打 `v*` tag 触发）：
-  `ghcr.io/<owner>/<repo>:<version|latest>`；
+  `ghcr.io/qizhuxu/xm2api:<version|latest>`；
 - 卷挂载：`./data`（凭证/账号池/管理密钥/用量）、`./config.yaml`、`./logs`；
 - ⚠️ 容器里 Host 头是 `<host>:<映射端口>`，安全护栏要加白 —— `docker-compose.yml`
   默认 `XM2API_ALLOWED_HOSTS: "%:18787"`（`%` 为后缀通配；改映射端口要同步）；对公网

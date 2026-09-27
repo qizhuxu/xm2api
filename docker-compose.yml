@@ -6,8 +6,8 @@
 services:
   xm2api:
     build: .
-    # 用 GitHub Actions 构建的镜像（ghcr.io/<owner>/<repo>）：
-    # image: ghcr.io/your-org/xm2api:latest
+    # 用 GitHub Actions 构建的镜像（ghcr.io/qizhuxu/xm2api）：
+    # image: ghcr.io/qizhuxu/xm2api:latest
     ports:
       - "18787:18787"
     environment:

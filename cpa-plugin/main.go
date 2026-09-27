@@ -43,7 +43,7 @@ const (
 	schemaVersion = 3
 )
 
-var pluginRepo = "https://github.com/your-org/xm2api"
+var pluginRepo = "https://github.com/qizhuxu/xm2api"
 
 /* ------------------------------------------------------------------ 配置 */
 
