@@ -251,6 +251,7 @@ curl -H "Authorization: Bearer <你的 api-key>" http://127.0.0.1:8317/v1/models
 | `exclude_models` | array | `[]` | 从模型列表隐藏的模型名，支持 `*` 通配，如 `["Doubao-*"]` |
 | `log_to_host` | boolean | `false` | 把插件事件写进宿主日志（启动 CPA 的终端）。默认关闭：终端不刷插件日志，事件无条件留痕到 `%TEMP%\mimo-plugin.log` |
 | `patch_panel` | boolean | `true` | **面板补丁自动注入**（v0.2.0+）：把 `#/auth-files` 额度带、`#/quota` 额度卡与「刷新 OAuth 凭证」按钮注入宿主 `management.html`；官方面板更新覆写后 10 分钟内自动重打。`false` 关闭 |
+| `standalone_panel` | boolean | `false` | **独立 mimo 管理面板**（v0.3.0+，默认关）：启用后官方面板侧边栏挂「MiMo 面板」菜单（`/v0/resource/plugins/mimo/panel`），功能对标 Node 版管理界面（见 §7.1） |
 
 改完可以热重载，不用重启：
 
@@ -645,6 +646,28 @@ CPA 升级后需重验。不想用图像时依旧可用 `exclude_models: ["Douba
      （测试脚本属开发资料，不随公开仓库发布。）
   其余实时位置：`POST /v0/management/quota/fetch`（curl/脚本）与
   `GET /v0/management/plugins/mimo/status`（状态 JSON `usage` 字段）。
+
+### 独立面板（Plan B）：`standalone_panel`
+
+官方面板的额度 UI 与补丁注入都有对抗面（硬编码 provider 表 / asset updater
+覆写补丁）⇒ v0.3.0 起提供**插件自带的独立管理面板**，与官方面板同源
+（`/v0/resource/plugins/mimo/panel`，共享管理密钥域）：
+
+- **默认关闭**：`plugins.configs.mimo.standalone_panel: true` 才在官方面板侧边栏
+  挂「MiMo 面板」菜单、才响应页面（404 引导）；也可热重载开启：
+  `PATCH /v0/management/plugins/mimo/config` body `{"standalone_panel":true}`；
+- **功能对标 Node 版管理界面**：
+  - 仪表盘：KPI（账号数/可用/模型数/平均额度/今日请求）+ **额度趋势折线** +
+    **近 30 天请求量柱状**（手写 SVG，深浅色）；
+  - 账号管理：启停 / 删除 / **刷新额度** / **刷新 OAuth 续期**（宿主官方端点）/
+    模型清单；
+  - 额度：每账号环形百分比卡 + 重置日期 + 手动刷新；
+  - 在线登录：创建登录会话（复用登录页：扫码/账号密码/新设备 OTP），成功自动入库；
+  - 模型：目录来源与数量（cache/upstream/fallback 可见）；
+- **密钥保护**：与官方面板同源时自动带出 `localStorage.managementKey`，
+  否则输入一次（只存 sessionStorage）；
+- 数据端点：`/plugins/mimo/usage/history`（额度历史，10 分钟节流每凭证 500 点）、
+  `/plugins/mimo/usage/daily?days=30`（日请求量，转发结果实时聚合，留 60 天）。
 
 ## 11. 管理面：状态、用量、登录
 

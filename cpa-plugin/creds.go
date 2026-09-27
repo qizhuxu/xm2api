@@ -294,6 +294,10 @@ func noteUsage(authID string, u *usageData, err error) {
 		s.ResetAt = u.ResetAt
 	}
 	usageStore.m[authID] = s
+	// 用量历史（独立面板数据层）：只记成功快照，10 分钟节流在内部
+	if err == nil {
+		noteUsagePoint(authID, u)
+	}
 }
 
 // usageSnapshotFor 返回可进 auth JSON / 状态页的用量快照；无记录返回 nil。

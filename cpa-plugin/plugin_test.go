@@ -354,6 +354,56 @@ func TestPanelPatchInject(t *testing.T) {
 	}
 }
 
+// TestPanelPage —— 独立面板（Plan B）：默认关闭返回 404 与不挂菜单；
+// 启用后页面可服务且含核心结构。
+func TestPanelPage(t *testing.T) {
+	setConfig(cfg{StandalonePanel: nil})
+	defer setConfig(defaultCfg())
+
+	if standalonePanelEnabled() {
+		t.Error("standalone_panel 应默认关闭")
+	}
+	if menu := panelMenuLabel(); menu != "" {
+		t.Errorf("默认不该挂菜单，得到 %q", menu)
+	}
+	res := servePanelPage()
+	if !strings.Contains(string(res), `"StatusCode":404`) {
+		t.Error("默认关闭时 /panel 应返回 404")
+	}
+
+	yes := true
+	setConfig(cfg{StandalonePanel: &yes})
+	if !standalonePanelEnabled() || panelMenuLabel() != "MiMo 面板" {
+		t.Error("启用后应挂「MiMo 面板」菜单")
+	}
+	// 信封的 Body 是 []byte（JSON base64），解出来再断言
+	var env struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			StatusCode int    `json:"StatusCode"`
+			Body       []byte `json:"Body"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(servePanelPage(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if !env.OK || env.Result.StatusCode != 200 {
+		t.Fatalf("启用后 /panel 应 200: %+v", env.Result.StatusCode)
+	}
+	body := string(env.Result.Body)
+	for _, needle := range []string{"MiMo 面板", "额度趋势", "近 30 天请求量", "在线登录", "gate-key"} {
+		if !strings.Contains(body, needle) {
+			t.Errorf("面板页面缺少 %q", needle)
+		}
+	}
+	if !isPanelResource(http.MethodGet, "/v0/resource/plugins/mimo/panel") {
+		t.Error("GET /panel 应识别为面板资源")
+	}
+	if isPanelResource(http.MethodPost, "/v0/resource/plugins/mimo/panel") {
+		t.Error("POST 不该命中面板资源")
+	}
+}
+
 func TestCredNormalizeFromCookie(t *testing.T) {
 	// 从 xm2api 的 sso-session.json 迁移过来的写法
 	c := mimoCred{Cookie: "serviceToken=abc123; userId=42"}
@@ -613,6 +663,8 @@ func TestManagementRegisterShape(t *testing.T) {
 		"/plugins/mimo/login/verify":   "POST",
 		"/plugins/mimo/login/cancel":   "POST",
 		"/plugins/mimo/login/status":   "GET",
+		"/plugins/mimo/usage/history":  "GET",
+		"/plugins/mimo/usage/daily":    "GET",
 	}
 	if len(env.Result.Routes) != len(wantRoutes) {
 		t.Fatalf("路由注册不对: %+v", env.Result.Routes)
@@ -622,8 +674,16 @@ func TestManagementRegisterShape(t *testing.T) {
 			t.Errorf("路由 %s 方法 %s 不对（期望 %s）", r.Path, r.Method, wantRoutes[r.Path])
 		}
 	}
-	if len(env.Result.Resources) != 1 || env.Result.Resources[0].Path != "/login" {
-		t.Errorf("资源注册不对: %+v", env.Result.Resources)
+	if len(env.Result.Resources) != 2 {
+		t.Fatalf("资源注册应有 /login 与 /panel 两条: %+v", env.Result.Resources)
+	}
+	for _, r := range env.Result.Resources {
+		if r.Path != "/login" && r.Path != "/panel" {
+			t.Errorf("未知资源 %s", r.Path)
+		}
+		if r.Menu != "" {
+			t.Errorf("默认配置下资源 %s 不该挂菜单（Menu=%q）", r.Path, r.Menu)
+		}
 	}
 	// 需求②：资源路由的 Menu 必须全部留空 —— 宿主对空 Menu 的资源路由不生成
 	// 面板菜单（snapshot.go:130-134），否则 management.html#/plugin-pages/mimo 会重现。

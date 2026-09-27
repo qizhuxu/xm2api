@@ -7,6 +7,7 @@ import (
 	"html"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -69,10 +70,16 @@ func handleManagementRegister(req []byte) []byte {
 				"Description": "取消登录会话"},
 			{"Method": "GET", "Path": "/plugins/mimo/login/status",
 				"Description": "查询登录会话状态"},
+			{"Method": "GET", "Path": "/plugins/mimo/usage/history",
+				"Description": "额度历史序列（10 分钟节流，每凭证 500 点）"},
+			{"Method": "GET", "Path": "/plugins/mimo/usage/daily",
+				"Description": "近 N 天请求量（按日聚合成功/失败；query days=30 可调，最大 120）"},
 		},
 		"resources": []map[string]any{
 			{"Path": "/login", "Menu": "",
 				"Description": "MiMo 登录页（扫码+账号密码双通道；一次性会话 ID 访问；Menu 留空故不进面板菜单）"},
+			{"Path": "/panel", "Menu": panelMenuLabel(),
+				"Description": "MiMo 独立管理面板（账号/额度/续期/在线登录/用量图表；standalone_panel: true 时挂菜单）"},
 		},
 	})
 }
@@ -91,6 +98,10 @@ func handleManagement(req []byte) []byte {
 	// ---- 资源路由（无管理鉴权）：登录页 / 会话状态轮询 / 账号密码登录 ----
 	// 只输出非敏感信息；qr/lp/loginUrl 等凭证等价物绝不出现，密码绝不回显。
 	if strings.Contains(in.Path, "/resource/") {
+		// 独立管理面板（Plan B）：/panel 页面
+		if isPanelResource(in.Method, in.Path) {
+			return servePanelPage()
+		}
 		id := ""
 		if v := in.Query["session"]; len(v) > 0 {
 			id = strings.TrimSpace(v[0])
@@ -152,6 +163,16 @@ func handleManagement(req []byte) []byte {
 		return wrapManagementHTTP(handleLoginCancel(in.Body))
 	case strings.Contains(in.Path, "/login/status"):
 		return wrapManagementHTTP(handleLoginStatus(in.Query))
+	case strings.HasSuffix(in.Path, "/usage/history"):
+		return jsonHTTP(map[string]any{"points": usageHistory()})
+	case strings.HasSuffix(in.Path, "/usage/daily"):
+		days := 30
+		if v := in.Query["days"]; len(v) > 0 {
+			if n, err := strconv.Atoi(strings.TrimSpace(v[0])); err == nil && n > 0 && n <= 120 {
+				days = n
+			}
+		}
+		return jsonHTTP(map[string]any{"days": usageDaily(days)})
 	}
 
 	// 默认：状态 JSON（凭证/用量/模型目录/配置）
@@ -176,6 +197,19 @@ func resourceJSON(status int, body string) []byte {
 		"StatusCode": status,
 		"Headers":    http.Header{"content-type": []string{"application/json"}},
 		"Body":       []byte(body),
+	})
+}
+
+// jsonHTTP 把任意值包成宿主要求的 {StatusCode,Headers,Body} 响应描述。
+func jsonHTTP(v any) []byte {
+	body, err := json.Marshal(v)
+	if err != nil {
+		body = []byte(`{"error":"序列化失败"}`)
+	}
+	return okResult(map[string]any{
+		"StatusCode": http.StatusOK,
+		"Headers":    http.Header{"content-type": []string{"application/json"}},
+		"Body":       body,
 	})
 }
 
@@ -279,14 +313,15 @@ func collectStatus() statusPayload {
 		Version:  pluginVer,
 		Provider: providerKey,
 		Config: map[string]any{
-			"base_url":        c.BaseURL,
-			"sid":             c.SID,
-			"web_search_auto": c.WebSearchAuto,
-			"refresh_after":   c.RefreshAfter,
-			"model_ttl":       c.ModelTTL,
-			"exclude_models":  c.ExcludeModels,
-			"log_to_host":     c.LogToHost,
-			"patch_panel":     patchPanelEnabled(),
+			"base_url":         c.BaseURL,
+			"sid":              c.SID,
+			"web_search_auto":  c.WebSearchAuto,
+			"refresh_after":    c.RefreshAfter,
+			"model_ttl":        c.ModelTTL,
+			"exclude_models":   c.ExcludeModels,
+			"log_to_host":      c.LogToHost,
+			"patch_panel":      patchPanelEnabled(),
+			"standalone_panel": standalonePanelEnabled(),
 		},
 		Models:      modelsSnapshot(),
 		Credentials: credSnapshot(),

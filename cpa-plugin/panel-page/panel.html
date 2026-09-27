@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MiMo 面板</title>
+<style>
+:root{
+  --bg:#0b1220; --bg2:#0f172a; --panel:rgba(30,41,59,.55); --panel2:rgba(51,65,85,.45);
+  --border:rgba(148,163,184,.16); --text:#e2e8f0; --muted:#94a3b8;
+  --accent:#38bdf8; --accent2:#818cf8; --ok:#34d399; --warn:#fbbf24; --bad:#f87171;
+}
+:root[data-theme="light"]{
+  --bg:#f1f5f9; --bg2:#ffffff; --panel:rgba(255,255,255,.72); --panel2:rgba(241,245,249,.9);
+  --border:rgba(15,23,42,.10); --text:#0f172a; --muted:#64748b;
+  --accent:#0284c7; --accent2:#4f46e5; --ok:#059669; --warn:#d97706; --bad:#dc2626;
+}
+*{box-sizing:border-box}
+body{margin:0;font:14px/1.6 "Segoe UI",system-ui,-apple-system,sans-serif;background:
+  radial-gradient(1200px 600px at 85% -10%,rgba(56,189,248,.10),transparent 60%),
+  radial-gradient(900px 500px at -10% 110%,rgba(129,140,248,.10),transparent 55%),var(--bg);
+  color:var(--text);min-height:100vh}
+.hidden{display:none!important}
+button{font:inherit;color:inherit;cursor:pointer;border:1px solid var(--border);
+  background:linear-gradient(180deg,var(--panel2),var(--panel));border-radius:10px;padding:7px 13px;
+  transition:.15s transform,.15s box-shadow}
+button:hover{transform:translateY(-1px);box-shadow:0 6px 18px rgba(2,132,199,.18)}
+button:disabled{opacity:.5;cursor:not-allowed;transform:none}
+button.primary{background:linear-gradient(135deg,var(--accent),var(--accent2));border-color:transparent;color:#fff}
+button.danger{color:var(--bad)}
+input,select{font:inherit;color:var(--text);background:var(--panel);border:1px solid var(--border);
+  border-radius:10px;padding:8px 12px;outline:none;width:100%}
+input:focus{border-color:var(--accent)}
+/* ---------- 密钥门 ---------- */
+#gate{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+  background:rgba(2,6,23,.55);backdrop-filter:blur(8px);z-index:50}
+#gate .card{width:min(420px,92vw);padding:28px;border-radius:18px;background:var(--panel);
+  border:1px solid var(--border);box-shadow:0 24px 64px rgba(0,0,0,.35)}
+#gate h2{margin:0 0 6px;font-size:20px}
+#gate p{margin:0 0 18px;color:var(--muted)}
+/* ---------- 布局 ---------- */
+.wrap{display:flex;min-height:100vh}
+aside{width:216px;padding:22px 14px;border-right:1px solid var(--border);
+  background:var(--panel);backdrop-filter:blur(14px);position:sticky;top:0;height:100vh}
+.brand{display:flex;align-items:center;gap:10px;font-size:17px;font-weight:600;margin-bottom:22px}
+.brand .logo{width:34px;height:34px;border-radius:10px;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;font-weight:700}
+nav a{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:10px;color:var(--muted);
+  text-decoration:none;margin:2px 0}
+nav a:hover{background:var(--panel2);color:var(--text)}
+nav a.active{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff}
+main{flex:1;padding:26px 30px;max-width:1180px}
+.topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:22px}
+.topbar h1{margin:0;font-size:22px}
+.muted{color:var(--muted)}
+.grid{display:grid;gap:16px}
+.grid.kpi{grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}
+.grid.two{grid-template-columns:repeat(auto-fit,minmax(380px,1fr))}
+.grid.cards{grid-template-columns:repeat(auto-fill,minmax(320px,1fr))}
+.card{padding:18px 20px;border-radius:16px;background:var(--panel);border:1px solid var(--border);
+  backdrop-filter:blur(14px)}
+.kpi .value{font-size:26px;font-weight:700;background:linear-gradient(135deg,var(--accent),var(--accent2));
+  -webkit-background-clip:text;background-clip:text;color:transparent}
+.kpi .label{color:var(--muted);font-size:12.5px;letter-spacing:.04em}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border-radius:999px;font-size:12px;
+  border:1px solid var(--border)}
+.pill.ok{color:var(--ok)} .pill.warn{color:var(--warn)} .pill.bad{color:var(--bad)}
+.bar{height:8px;border-radius:99px;background:var(--panel2);overflow:hidden;margin:10px 0 6px}
+.bar i{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--accent),var(--accent2))}
+.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.row.between{justify-content:space-between}
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.actions button{padding:5px 11px;font-size:12.5px;border-radius:9px}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--border);font-size:13px}
+th{color:var(--muted);font-weight:600;font-size:12px;letter-spacing:.05em}
+.chart{width:100%;height:230px}
+.toast{position:fixed;right:22px;bottom:22px;z-index:80;display:flex;flex-direction:column;gap:8px}
+.toast .item{padding:10px 16px;border-radius:12px;background:var(--panel);border:1px solid var(--border);
+  box-shadow:0 12px 32px rgba(0,0,0,.28);animation:pop .18s ease}
+@keyframes pop{from{transform:translateY(8px);opacity:0}to{transform:none;opacity:1}}
+.ring{width:104px;height:104px;flex:none}
+pre{white-space:pre-wrap;word-break:break-all;font-size:12px;color:var(--muted)}
+iframe{width:100%;height:560px;border:1px solid var(--border);border-radius:14px;background:#fff}
+</style>
+</head>
+<body>
+
+<div id="gate" class="hidden">
+  <div class="card">
+    <h2>MiMo 独立面板</h2>
+    <p>输入 CPA 管理密钥（X-Management-Key）。与官方面板同源时会自动带出。</p>
+    <input id="gate-key" type="password" placeholder="管理密钥" autocomplete="off">
+    <div class="actions"><button class="primary" id="gate-go">进入面板</button></div>
+    <p class="muted" id="gate-msg" style="margin-top:12px"></p>
+  </div>
+</div>
+
+<div class="wrap">
+  <aside>
+    <div class="brand"><div class="logo">M</div><span>MiMo 面板</span></div>
+    <nav id="nav">
+      <a href="#/dashboard" data-v="dashboard" class="active">◧ 仪表盘</a>
+      <a href="#/accounts" data-v="accounts">☰ 账号管理</a>
+      <a href="#/quota" data-v="quota">◔ 额度</a>
+      <a href="#/login" data-v="login">⚿ 在线登录</a>
+      <a href="#/models" data-v="models">⌘ 模型</a>
+    </nav>
+    <div style="position:absolute;bottom:18px;left:14px;right:14px" class="row between">
+      <button id="theme-btn" style="flex:1">🌓 深浅色</button>
+      <button id="relogin-btn" title="更换管理密钥">🔑</button>
+    </div>
+  </aside>
+
+  <main>
+    <div class="topbar">
+      <h1 id="view-title">仪表盘</h1>
+      <div class="row">
+        <span class="pill" id="key-pill">…</span>
+        <button id="refresh-all">↻ 刷新</button>
+      </div>
+    </div>
+
+    <section id="view-dashboard">
+      <div class="grid kpi" id="kpi"></div>
+      <div class="grid two" style="margin-top:18px">
+        <div class="card">
+          <div class="row between"><b>额度趋势</b><span class="muted">每 10 分钟采样</span></div>
+          <svg id="chart-line" class="chart" viewBox="0 0 640 230" preserveAspectRatio="none"></svg>
+          <div id="line-legend" class="row" style="gap:14px"></div>
+        </div>
+        <div class="card">
+          <div class="row between"><b>近 30 天请求量</b><span class="muted">成功 / 失败</span></div>
+          <svg id="chart-bar" class="chart" viewBox="0 0 640 230" preserveAspectRatio="none"></svg>
+          <div class="row" style="gap:14px"><span class="pill ok">■ 成功</span><span class="pill bad">■ 失败</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-accounts" class="hidden">
+      <div class="grid cards" id="accounts"></div>
+    </section>
+
+    <section id="view-quota" class="hidden">
+      <div class="row" style="margin-bottom:14px">
+        <button class="primary" id="quota-refresh-all">↻ 全部刷新额度</button>
+        <span class="muted">默认不自动拉取；点击按钮或卡片上的刷新查看</span>
+      </div>
+      <div class="grid cards" id="quota-cards"></div>
+    </section>
+
+    <section id="view-login" class="hidden">
+      <div class="card">
+        <div class="row between">
+          <div><b>在线登录小米账号</b><div class="muted">扫码 / 账号密码 / 新设备验证码（复用登录页会话，密码不落盘不进日志）</div></div>
+          <button class="primary" id="login-new">＋ 创建登录会话</button>
+        </div>
+        <div id="login-status" class="muted" style="margin:12px 0"></div>
+        <iframe id="login-frame" class="hidden" title="MiMo 登录"></iframe>
+      </div>
+    </section>
+
+    <section id="view-models" class="hidden">
+      <div class="card">
+        <div class="row between"><b>模型清单</b><span class="muted" id="models-src"></span></div>
+        <table><thead><tr><th>模型</th><th>类型</th><th>厂商</th></tr></thead><tbody id="models-body"></tbody></table>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+'use strict';
+/* ================= 密钥与 API ================= */
+var KEY = sessionStorage.getItem('mimo.panel.key') || localStorage.getItem('managementKey') || '';
+function setKey(k){ KEY = k; try{ sessionStorage.setItem('mimo.panel.key', k); }catch(e){} }
+function toast(msg, cls){
+  var box = document.getElementById('toast');
+  var d = document.createElement('div');
+  d.className = 'item' + (cls ? ' ' + cls : '');
+  d.textContent = msg;
+  box.appendChild(d);
+  setTimeout(function(){ d.remove(); }, 3600);
+}
+async function api(path, opts){
+  opts = opts || {};
+  opts.headers = Object.assign({
+    'Authorization': 'Bearer ' + KEY,
+    'X-Management-Key': KEY,
+    'content-type': 'application/json'
+  }, opts.headers || {});
+  var res = await fetch(path, opts);
+  if (res.status === 401 || res.status === 403) {
+    showGate('密钥无效或已过期，请重新输入');
+    throw new Error('auth');
+  }
+  var body = await res.json().catch(function(){ return {}; });
+  if (!res.ok) throw new Error(body.message || body.error || ('HTTP ' + res.status));
+  return body;
+}
+function showGate(msg){
+  document.getElementById('gate').classList.remove('hidden');
+  if (msg) document.getElementById('gate-msg').textContent = msg;
+}
+document.getElementById('gate-go').onclick = function(){
+  var k = document.getElementById('gate-key').value.trim();
+  if (!k) return;
+  setKey(k);
+  document.getElementById('gate').classList.add('hidden');
+  boot();
+};
+document.getElementById('relogin-btn').onclick = function(){ showGate(''); };
+
+/* ================= 主题 ================= */
+(function(){
+  var t = localStorage.getItem('mimo.panel.theme') || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+  document.documentElement.setAttribute('data-theme', t);
+})();
+document.getElementById('theme-btn').onclick = function(){
+  var next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', next);
+  localStorage.setItem('mimo.panel.theme', next);
+};
+
+/* ================= 路由 ================= */
+var TITLES = { dashboard:'仪表盘', accounts:'账号管理', quota:'额度', login:'在线登录', models:'模型' };
+function route(){
+  var v = (location.hash || '#/dashboard').replace('#/', '') || 'dashboard';
+  if (!TITLES[v]) v = 'dashboard';
+  ['dashboard','accounts','quota','login','models'].forEach(function(name){
+    document.getElementById('view-' + name).classList.toggle('hidden', name !== v);
+  });
+  [].forEach.call(document.querySelectorAll('#nav a'), function(a){
+    a.classList.toggle('active', a.dataset.v === v);
+  });
+  document.getElementById('view-title').textContent = TITLES[v];
+}
+window.addEventListener('hashchange', route);
+
+/* ================= 数据 ================= */
+var state = { status: null, files: [], usage: [], daily: [] };
+function mimoFiles(){
+  return state.files.filter(function(f){ return (f.provider || f.type) === 'mimo'; });
+}
+function authIndex(f){ return f.auth_index || ''; }
+
+async function loadStatus(){
+  state.status = await api('/v0/management/plugins/mimo/status');
+}
+async function loadFiles(){
+  var j = await api('/v0/management/auth-files');
+  state.files = j.files || j || [];
+}
+async function loadUsage(){
+  var h = await api('/v0/management/plugins/mimo/usage/history?_=' + Date.now());
+  state.usage = h.points || [];
+  var d = await api('/v0/management/plugins/mimo/usage/daily?days=30');
+  state.days = d.days || [];
+}
+
+/* ================= 仪表盘 ================= */
+function renderKpi(){
+  var files = mimoFiles();
+  var enabled = files.filter(function(f){ return !f.disabled && f.status === 'active'; });
+  var models = (state.status && state.status.models && state.status.models.Count) || 0;
+  var pcts = files.map(function(f){
+    var m = /剩余\s*(\d+(?:\.\d+)?)%/.exec(f.label || '');
+    return m ? parseFloat(m[1]) : null;
+  }).filter(function(v){ return v !== null; });
+  var avg = pcts.length ? Math.round(pcts.reduce(function(a, b){ return a + b; }, 0) / pcts.length) : null;
+  var today = (state.days || []).slice(-1)[0] || { success: 0, failed: 0 };
+  var items = [
+    { label: '账号总数', value: files.length },
+    { label: '可用账号', value: enabled.length },
+    { label: '模型数', value: models },
+    { label: '平均剩余额度', value: (avg === null ? '—' : avg + '%') },
+    { label: '今日请求', value: (today.success + today.failed) }
+  ];
+  document.getElementById('kpi').innerHTML = items.map(function(it){
+    return '<div class="card kpi"><div class="label">' + it.label + '</div><div class="value">' + it.value + '</div></div>';
+  }).join('');
+}
+
+function lineChart(svgId, legendId, series, opts){
+  opts = opts || {};
+  var svg = document.getElementById(svgId);
+  var W = 640, H = 230, PL = 42, PR = 12, PT = 14, PB = 26;
+  var iw = W - PL - PR, ih = H - PT - PB;
+  var colors = ['#38bdf8', '#818cf8', '#34d399', '#fbbf24', '#f87171', '#22d3ee'];
+  var n = Math.max.apply(null, series.map(function(s){ return s.points.length; }).concat([2]));
+  var x = function(i){ return PL + iw * (n <= 1 ? 0 : i / (n - 1)); };
+  var y = function(v){ return PT + ih * (1 - Math.max(0, Math.min(100, v)) / 100); };
+  var out = [];
+  for (var g = 0; g <= 4; g++) {
+    var gy = PT + ih * g / 4;
+    out.push('<line x1="' + PL + '" y1="' + gy + '" x2="' + (W - PR) + '" y2="' + gy + '" stroke="currentColor" opacity=".12"/>');
+    out.push('<text x="' + (PL - 8) + '" y="' + (gy + 4) + '" text-anchor="end" font-size="10" fill="currentColor" opacity=".5">' + (100 - g * 25) + '%</text>');
+  }
+  series.forEach(function(s, si){
+    if (!s.points.length) return;
+    var pts = s.points.map(function(v, i){ return x(i) + ',' + y(v); }).join(' ');
+    var area = x(0) + ',' + y(0) + ' ' + pts + ' ' + x(s.points.length - 1) + ',' + y(0);
+    out.push('<polygon points="' + area + '" fill="' + colors[si % colors.length] + '" opacity=".12"/>');
+    out.push('<polyline points="' + pts + '" fill="none" stroke="' + colors[si % colors.length] + '" stroke-width="2.2" stroke-linejoin="round"/>');
+  });
+  svg.innerHTML = out.join('');
+  if (legendId) {
+    document.getElementById(legendId).innerHTML = series.map(function(s, si){
+      return '<span class="pill" style="color:' + colors[si % colors.length] + '">● ' + s.name + '</span>';
+    }).join('');
+  }
+}
+
+function barChart(svgId, days){
+  var svg = document.getElementById(svgId);
+  var W = 640, H = 230, PL = 34, PR = 10, PT = 14, PB = 26;
+  var iw = W - PL - PR, ih = H - PT - PB;
+  var max = Math.max.apply(null, days.map(function(d){ return d.success + d.failed; }).concat([1]));
+  var bw = iw / days.length;
+  var out = [];
+  for (var g = 0; g <= 3; g++) {
+    var gy = PT + ih * g / 3;
+    out.push('<line x1="' + PL + '" y1="' + gy + '" x2="' + (W - PR) + '" y2="' + gy + '" stroke="currentColor" opacity=".12"/>');
+    out.push('<text x="' + (PL - 6) + '" y="' + (gy + 4) + '" text-anchor="end" font-size="10" fill="currentColor" opacity=".5">' + Math.round(max * (3 - g) / 3) + '</text>');
+  }
+  days.forEach(function(d, i){
+    var hs = ih * (d.success / max), hf = ih * (d.failed / max);
+    var bx = PL + i * bw + bw * 0.18, w = bw * 0.64;
+    out.push('<rect x="' + bx + '" y="' + (PT + ih - hs) + '" width="' + w + '" height="' + hs + '" fill="#34d399" rx="2"><title>' + d.date + ' 成功 ' + d.success + '</title></rect>');
+    out.push('<rect x="' + bx + '" y="' + (PT + ih - hs - hf) + '" width="' + w + '" height="' + hf + '" fill="#f87171" rx="2"><title>' + d.date + ' 失败 ' + d.failed + '</title></rect>');
+    if (i % 5 === 0) {
+      out.push('<text x="' + (bx + w / 2) + '" y="' + (H - 8) + '" text-anchor="middle" font-size="9" fill="currentColor" opacity=".5">' + d.date.slice(5) + '</text>');
+    }
+  });
+  svg.innerHTML = out.join('');
+}
+
+function renderCharts(){
+  var byAuth = {};
+  state.usage.forEach(function(p){
+    if (!byAuth[p.auth_id]) byAuth[p.auth_id] = [];
+    byAuth[p.auth_id].push(p.percent);
+  });
+  var series = Object.keys(byAuth).map(function(k){ return { name: k, points: byAuth[k].slice(-96) }; });
+  if (!series.length) series = [{ name: '暂无采样（额度刷新后累积）', points: [] }];
+  lineChart('chart-line', 'line-legend', series);
+  barChart('chart-bar', state.days || []);
+}
+
+/* ================= 账号管理 ================= */
+function renderAccounts(){
+  var box = document.getElementById('accounts');
+  var files = mimoFiles();
+  if (!files.length) {
+    box.innerHTML = '<div class="card muted">暂无 mimo 凭证 —— 到「在线登录」添加，或从本机导出 mimo.json 上传。</div>';
+    return;
+  }
+  box.innerHTML = files.map(function(f, i){
+    var pct = /剩余\s*(\d+(?:\.\d+)?)%/.exec(f.label || '');
+    var ok = f.status === 'active' && !f.disabled;
+    return '<div class="card">' +
+      '<div class="row between"><b>' + esc(f.label || f.name || f.id) + '</b>' +
+        '<span class="pill ' + (ok ? 'ok' : (f.disabled ? 'warn' : 'bad')) + '">' + (ok ? '正常' : (f.disabled ? '已禁用' : (f.status || '异常'))) + '</span></div>' +
+      '<div class="muted" style="margin-top:6px">文件 ' + esc(f.name) + ' · ' + (f.size || 0) + ' B' +
+        (pct ? ' · 剩余 ' + pct[1] + '%' : '') + '</div>' +
+      '<div class="actions">' +
+        '<button data-act="quota" data-i="' + i + '">↻ 刷新额度</button>' +
+        '<button data-act="oauth" data-i="' + i + '">↻ 刷新 OAuth</button>' +
+        '<button data-act="toggle" data-i="' + i + '">' + (f.disabled ? '启用' : '禁用') + '</button>' +
+        '<button data-act="models" data-i="' + i + '">模型</button>' +
+        '<button data-act="del" data-i="' + i + '" class="danger">删除</button>' +
+      '</div></div>';
+  }).join('');
+  box.onclick = accountAction;
+}
+
+async function accountAction(ev){
+  var b = ev.target.closest('button[data-act]');
+  if (!b) return;
+  var f = mimoFiles()[+b.dataset.i];
+  if (!f) return;
+  b.disabled = true;
+  try {
+    if (b.dataset.act === 'quota') {
+      var q = await api('/v0/management/plugins/mimo/quota?auth_index=' + encodeURIComponent(authIndex(f)));
+      toast('额度已刷新：' + esc(f.label || f.name), 'ok');
+      await loadFiles(); renderAccounts(); renderQuota();
+    } else if (b.dataset.act === 'oauth') {
+      await api('/v0/management/auth-files/refresh', { method: 'POST', body: JSON.stringify({ name: f.name, auth_index: authIndex(f) }) });
+      toast('已提交刷新 OAuth 请求', 'ok');
+    } else if (b.dataset.act === 'toggle') {
+      await api('/v0/management/auth-files/status', { method: 'PATCH', body: JSON.stringify({ name: f.name, disabled: !f.disabled }) });
+      toast(f.disabled ? '已启用' : '已禁用', 'ok');
+      await loadFiles(); renderAccounts();
+    } else if (b.dataset.act === 'del') {
+      if (!confirm('确定删除 ' + f.name + '？')) return;
+      await api('/v0/management/auth-files', { method: 'DELETE', body: JSON.stringify({ names: [f.name] }) });
+      toast('已删除 ' + f.name, 'ok');
+      await loadFiles(); renderAccounts(); renderQuota();
+    } else if (b.dataset.act === 'models') {
+      var m = await api('/v0/management/auth-files/models?name=' + encodeURIComponent(f.name));
+      toast('模型数：' + ((m.models || m || []).length), 'ok');
+    }
+  } catch (e) {
+    if (e.message !== 'auth') toast('操作失败：' + e.message);
+  }
+  b.disabled = false;
+}
+
+/* ================= 额度卡片 ================= */
+function ringSvg(pct){
+  var r = 42, c = 2 * Math.PI * r, off = c * (1 - Math.max(0, Math.min(100, pct)) / 100);
+  return '<svg class="ring" viewBox="0 0 104 104">' +
+    '<circle cx="52" cy="52" r="' + r + '" fill="none" stroke="currentColor" opacity=".12" stroke-width="10"/>' +
+    '<circle cx="52" cy="52" r="' + r + '" fill="none" stroke="url(#g1)" stroke-width="10" stroke-linecap="round"' +
+    ' stroke-dasharray="' + c + '" stroke-dashoffset="' + off + '" transform="rotate(-90 52 52)"/>' +
+    '<defs><linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">' +
+    '<stop offset="0" stop-color="#38bdf8"/><stop offset="1" stop-color="#818cf8"/></linearGradient></defs>' +
+    '<text x="52" y="58" text-anchor="middle" font-size="19" font-weight="700" fill="currentColor">' + Math.round(pct) + '%</text></svg>';
+}
+function renderQuota(){
+  var box = document.getElementById('quota-cards');
+  var files = mimoFiles();
+  if (!files.length) {
+    box.innerHTML = '<div class="card muted">暂无 mimo 凭证</div>';
+    return;
+  }
+  box.innerHTML = files.map(function(f, i){
+    var m = /剩余\s*(\d+(?:\.\d+)?)%/.exec(f.label || '');
+    var pct = m ? parseFloat(m[1]) : null;
+    var rst = /(\d{4}-\d{2}-\d{2})\s*重置/.exec(f.label || '');
+    return '<div class="card"><div class="row" style="gap:14px">' +
+      (pct === null ? '<div class="ring" style="display:flex;align-items:center;justify-content:center;color:var(--muted)">未取</div>' : ringSvg(pct)) +
+      '<div><b>' + esc(f.name) + '</b><div class="muted">' + (rst ? '重置 ' + rst[1] : '重置日期未知') + '</div></div></div>' +
+      '<div class="actions"><button data-act="quota" data-i="' + i + '">↻ 刷新额度</button>' +
+      '<button data-act="oauth" data-i="' + i + '">↻ 刷新 OAuth</button></div></div>';
+  }).join('');
+  box.onclick = accountAction;
+}
+document.getElementById('quota-refresh-all').onclick = async function(){
+  var files = mimoFiles();
+  for (var i = 0; i < files.length; i++) {
+    try {
+      await api('/v0/management/plugins/mimo/quota?auth_index=' + encodeURIComponent(authIndex(files[i])));
+    } catch (e) {}
+  }
+  toast('已全部刷新', 'ok');
+  await loadFiles(); renderQuota();
+};
+
+/* ================= 在线登录 ================= */
+document.getElementById('login-new').onclick = async function(){
+  try {
+    var r = await api('/v0/management/plugins/mimo/login/start', { method: 'POST', body: '{}' });
+    var s = r.result || r;
+    var url = s.url || s.login_url || '';
+    if (!url) { toast('创建会话失败：' + JSON.stringify(s).slice(0, 80)); return; }
+    var frame = document.getElementById('login-frame');
+    frame.src = url;
+    frame.classList.remove('hidden');
+    document.getElementById('login-status').textContent = '会话 ' + (s.session || '') + ' —— 扫码或用账号密码登录，完成后凭证自动入库';
+  } catch (e) {
+    if (e.message !== 'auth') toast('创建登录会话失败：' + e.message);
+  }
+};
+
+/* ================= 模型 ================= */
+function renderModels(){
+  var ms = (state.status && state.status.models) || {};
+  var list = (state.status && state.status.model_list) || [];
+  document.getElementById('models-src').textContent =
+    '来源 ' + (ms.Source || '—') + (ms.Err ? '（' + ms.Err + '）' : '') + ' · ' + (ms.Count || 0) + ' 个';
+  var rows = list.map(function(m){
+    return '<tr><td>' + esc(m.ID || m.Name || '') + '</td><td>' + esc(m.Type || '') + '</td><td>' + esc(m.OwnedBy || '') + '</td></tr>';
+  });
+  document.getElementById('models-body').innerHTML =
+    rows.length ? rows.join('') : '<tr><td colspan="3" class="muted">明细见 /plugins/mimo/status（此处只显示数量与来源）</td></tr>';
+}
+
+/* ================= 工具 ================= */
+function esc(s){
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+/* ================= 启动 ================= */
+async function boot(){
+  route();
+  try {
+    await loadStatus();
+    await loadFiles();
+    await loadUsage();
+    document.getElementById('key-pill').textContent = '密钥已就绪';
+    renderKpi(); renderCharts(); renderAccounts(); renderQuota(); renderModels();
+  } catch (e) {
+    if (e.message !== 'auth') {
+      toast('加载失败：' + e.message);
+      document.getElementById('key-pill').textContent = '加载失败';
+    }
+  }
+}
+document.getElementById('refresh-all').onclick = boot;
+if (!KEY) showGate(''); else boot();
+</script>
+</body>
+</html>

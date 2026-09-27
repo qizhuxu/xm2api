@@ -33,7 +33,7 @@ import (
 
 const (
 	providerKey = "mimo"
-	pluginVer   = "0.2.0"
+	pluginVer   = "0.3.0"
 	pluginName  = "MiMo (Xiaomi MiMo Desktop SSO)"
 
 	defaultBase = "https://mimo-server-cn.xiaomimimo.com"
@@ -60,8 +60,11 @@ type cfg struct {
 	// PatchPanel 面板补丁自动注入（默认开）：把 mimo-quota-patch 注入宿主的
 	// management.html，让 #/auth-files 额度带与 #/quota 额度卡在 Docker 等
 	// 手工不便的部署形态下也可用。false 关闭。
-	PatchPanel  *bool       `yaml:"patch_panel"`
-	OTPAutoMail *otpMailCfg `yaml:"otp_auto_mail"`
+	PatchPanel *bool `yaml:"patch_panel"`
+	// StandalonePanel 独立 mimo 管理面板（默认关）：启用后官方面板侧边栏挂
+	// 「MiMo 面板」菜单，功能对标 Node 版管理界面（账号/额度/续期/登录/图表）。
+	StandalonePanel *bool       `yaml:"standalone_panel"`
+	OTPAutoMail     *otpMailCfg `yaml:"otp_auto_mail"`
 }
 
 func defaultCfg() cfg {
@@ -305,9 +308,9 @@ func dispatch(method string, req []byte) []byte {
 		return handleModels(method, req)
 
 	case methodExecutorExecute:
-		return handleExecute(req)
+		return execCounted(handleExecute(req))
 	case methodExecutorExecuteStream:
-		return handleExecuteStream(req)
+		return execCounted(handleExecuteStream(req))
 	case methodExecutorCountTokens:
 		return handleCountTokens(req)
 
@@ -361,6 +364,7 @@ func handleRegister(req []byte) []byte {
 				{"Name": "model_ttl", "Type": "string", "Description": "模型清单缓存时长，默认 10m"},
 				{"Name": "exclude_models", "Type": "array", "Description": "要从模型列表里隐藏的模型名，支持 * 通配。例如 [\"Doubao-*\"]。图像模型（Doubao-Seedream-5.0-pro）现已可经插件服务 /v1/images/generations，是否隐藏取决于客户端需求"},
 				{"Name": "patch_panel", "Type": "boolean", "Description": "面板补丁自动注入（默认 true）：把 #/auth-files 额度带与 #/quota 额度卡注入宿主 management.html；官方面板更新覆写后会自动重打。false 关闭"},
+				{"Name": "standalone_panel", "Type": "boolean", "Description": "独立 mimo 管理面板（默认 false）：启用后官方面板侧边栏挂「MiMo 面板」菜单（/v0/resource/plugins/mimo/panel），功能对标 Node 版管理界面（账号管理/额度卡片/刷新续期/在线登录/用量图表）"},
 				{"Name": "log_to_host", "Type": "boolean", "Description": "把插件事件写进宿主日志（启动 CPA 的终端）。默认关闭 —— 事件只进 %TEMP%/mimo-plugin.log 文件日志，不刷终端"},
 			},
 		},
