@@ -106,6 +106,12 @@ glibc 构建**完全兼容**（发布资产 `mimo.so` 最高只要求 `GLIBC_2.3
 
    面板里也能直接看：`#/plugins` 一行插件卡片、`#/auth-files` 凭证与用量 label。
 
+   **面板补丁全自动**（v0.2.0+）：插件启动时自动把补丁注入容器内的
+   `/CLIProxyAPI/static/management.html` —— `#/auth-files` 的「点击此处刷新额度」
+   与「刷新 OAuth 凭证」按钮、`#/quota` 的 mimo 额度卡开箱即用，无需手工打补丁；
+   官方面板更新覆写后 10 分钟内自动重打（控制台 `window.__mimoQuotaPatch`
+   可看当前补丁版本）。
+
 ⚠️ **兼容性边界**：发布资产是 **glibc** 构建（CGO），仅适用于 Debian/Ubuntu 系镜像。
 **Alpine（musl）镜像加载不了**（缺 `libc.so.6`）——要么换 Debian 系基础镜像，
 要么在 alpine 环境里 `make build` 自建 musl 版 `mimo.so` 手动放 `plugins/`。
@@ -244,6 +250,7 @@ curl -H "Authorization: Bearer <你的 api-key>" http://127.0.0.1:8317/v1/models
 | `model_ttl` | string | `10m` | 模型清单缓存时长 |
 | `exclude_models` | array | `[]` | 从模型列表隐藏的模型名，支持 `*` 通配，如 `["Doubao-*"]` |
 | `log_to_host` | boolean | `false` | 把插件事件写进宿主日志（启动 CPA 的终端）。默认关闭：终端不刷插件日志，事件无条件留痕到 `%TEMP%\mimo-plugin.log` |
+| `patch_panel` | boolean | `true` | **面板补丁自动注入**（v0.2.0+）：把 `#/auth-files` 额度带、`#/quota` 额度卡与「刷新 OAuth 凭证」按钮注入宿主 `management.html`；官方面板更新覆写后 10 分钟内自动重打。`false` 关闭 |
 
 改完可以热重载，不用重启：
 
@@ -598,10 +605,15 @@ CPA 升级后需重验。不想用图像时依旧可用 `exclude_models: ["Douba
      **密钥零配置**：patch 在 `<head>` 安装 fetch/XHR hook，捕获面板自身请求的
      `Authorization: Bearer <key>`（实测捕获成功），不再依赖登录时勾选「记住密码」或控制台注入。
      **自检**：控制台 `window.__mimoQuotaState()` 返回门闸值/卡片数/隐藏卡数（只读、无凭证）。
-     **⚠️ 注入必须走脚本**：`node cpa-plugin/panel-patch/apply-patch.mjs [--bin <CPA bin>]`
-     （默认 `%TEMP%\cpa-test\bin`；`--dry-run` 只校验）。它做三件事：从
-     `management.html.orig` 还原干净原版（勿叠加）、注入前用 `node:vm` 解析内联脚本
-     **语法不过就不写盘**、把上一版备份到 `.prev`。
+     **⚠️ 注入方式（v0.2.0+ 自动）**：插件启动时自动把补丁注入宿主
+     `management.html`（`panelpatch.go`，go:embed 内嵌补丁源；候选位置
+     `static/management.html`、`bin/static/...`、`/CLIProxyAPI/static/...`
+     —— Docker 容器内即命中），每 10 分钟重检一次：官方面板 updater 覆写
+     文件后自动重打（补丁版本升级也会自动整段替换）。配置 `patch_panel: false`
+     可关闭。手工注入仍可用 `node cpa-plugin/panel-patch/apply-patch.mjs
+     [--bin <CPA bin>]`（默认 `%TEMP%\cpa-test\bin`；`--dry-run` 只校验），
+     它从 `management.html.orig` 还原干净原版（勿叠加）、注入前用 `node:vm`
+     解析内联脚本**语法不过就不写盘**、把上一版备份到 `.prev`。
      **v7.4.1 的教训**：版本标记写成 `window.__mimoQuotaPatch=7.4.1`（`7.4.1` 不是合法
      数字字面量）⇒ 整个 `<script>` 解析失败、补丁一行没跑，现象正是用户报的
      「`#/quota` 两张卡消失 + 卡片里『点击此处刷新额度』按钮没了」，控制台只有
@@ -611,6 +623,12 @@ CPA 升级后需重验。不想用图像时依旧可用 `exclude_models: ["Douba
      **前置**：config `remote-management.disable-auto-update-panel: true`
      （否则 updater 按 GitHub digest 覆写本地面板，实测源码
      `managementasset/updater.go:117,280`）。
+     **补丁 v7.7（mimo 卡补「刷新 OAuth 凭证」按钮）**：官方面板的手动刷新按钮
+     只渲染内置 6 家（bundle 实测门槛 `Set{meta,antigravity,claude,codex,kimi,xai}`，
+     两版面板都不含插件 provider）⇒ mimo 卡永远没有该按钮。补丁自己补一个
+     （额度带空闲相/数据相都渲染），点击走宿主官方端点
+     `POST /v0/management/auth-files/refresh`（body `{name, auth_index}`）真实触发
+     插件 `auth.refresh` 续期，按钮文案实时反馈（刷新中…/已提交刷新请求/刷新失败）。
      **补丁 v7.6（#/quota 对齐官方 antigravity + 默认不显示额度，点击刷新后显示）**：
      卡片壳逐字复刻 `QuotaCard-module__*`（header: iconWrap + iconFallback(无 logo
      官方兜底字母 M) + fileName；body: idleBody 大按钮「点击此处刷新额度」+ 循环箭头
