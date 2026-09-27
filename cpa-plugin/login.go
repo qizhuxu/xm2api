@@ -1217,8 +1217,8 @@ func finishLogin(s *qrSession, tok *qrTokens) {
 	rememberCred(authID, c)
 	invalidateModels()
 	// 异步取用量快照：poll RPC 懒构建 AuthData 时带上 usage_snapshot，宿主落盘后
-	// 面板 auth-files 详情 INFO 可见。失败不影响登录。
-	go tryAttachUsage(authID, c)
+	// 面板 auth-files 详情 INFO 可见。失败不影响登录。usageGo 可被测试等待落定。
+	usageGo(func() { tryAttachUsage(authID, c) })
 
 	qrStore.Lock()
 	s.Status = status

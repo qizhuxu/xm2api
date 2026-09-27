@@ -232,6 +232,36 @@ var usageStore = struct {
 	m map[string]usageState
 }{m: map[string]usageState{}}
 
+// usageWG 跟踪所有异步用量写入（finishLogin 的 tryAttachUsage、tryAttachUsage
+// 内部的 persistUsageToAuthFiles）。测试用 awaitUsageWrites 等它们落定，
+// 避免"上一个测试的网络 goroutine 晚到"污染下一个测试的用量状态（CI 实测踩过：
+// TestPasswordLoginFlow 的 mimo-77 异步失败记录把 TestPersistUsageToAuthFiles 的
+// 82.2% 后缀吃掉，时序相关、仅在慢 runner 上复现）。
+var usageWG sync.WaitGroup
+
+func usageGo(fn func()) {
+	usageWG.Add(1)
+	go func() {
+		defer usageWG.Done()
+		fn()
+	}()
+}
+
+// awaitUsageWrites 等待全部异步用量写入结束；返回是否在期限内落定。
+func awaitUsageWrites(d time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		usageWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
 func noteUsage(authID string, u *usageData, err error) {
 	if authID == "" {
 		return

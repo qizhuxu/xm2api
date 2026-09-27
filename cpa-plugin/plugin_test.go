@@ -1128,6 +1128,9 @@ func TestAuthLoginStartPollRPCBridge(t *testing.T) {
 	if !strings.Contains(string(raw3), `"error"`) {
 		t.Fatalf("未知会话应 error: %s", raw3)
 	}
+	// 等 finishLogin 的异步用量写入落定再结束 —— 网络 goroutine 泄漏到后续
+	// 测试会污染共享的 usageStore（CI 实测踩过，时序相关）
+	awaitUsageWrites(2 * time.Second)
 }
 
 // TestPasswordLoginFlow —— 通道 2：serviceLoginAuth2 账号密码登录。
@@ -1270,6 +1273,8 @@ func TestPasswordLoginFlow(t *testing.T) {
 	if err != nil || tok.PassToken != "V1:ck" || tok.UserID != "55" || tok.CUserID != "c55" {
 		t.Fatalf("cookie 通道收集失败 tok=%+v err=%v", tok, err)
 	}
+	// 等成功路径 finishLogin 的异步用量写入落定（同 mimo-77，勿泄漏给后续测试）
+	awaitUsageWrites(2 * time.Second)
 }
 
 // TestResourcePasswordRouteWrap —— 登录页密码表单走资源路由（POST），错误包成
@@ -1318,6 +1323,9 @@ func TestResourcePasswordRouteWrap(t *testing.T) {
 func TestPersistUsageToAuthFiles(t *testing.T) {
 	// 凭证缓存：persist 按 user_id 匹配文件
 	authID := providerKey + "-77"
+	// 先等前序测试的异步用量写入（如 TestPasswordLoginFlow 的 mimo-77 网络抓取）
+	// 落定再播种 —— 否则它的错误记录可能覆盖本测试的 82.2%（CI 时序 flake 根因）
+	awaitUsageWrites(2 * time.Second)
 	rememberCred(authID, mimoCred{UserID: "77", ServiceToken: "tokA", PassToken: "pA"})
 	noteUsage(authID, &usageData{Percent: 82.2, ResetDate: "2026-09-23"}, nil)
 

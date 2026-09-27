@@ -100,7 +100,7 @@ func tryAttachUsage(authID string, c mimoCred) {
 		return
 	}
 	// 异步把用量写进 auth 文件 label + usage_snapshot（面板列表直接可见）。
-	go persistUsageToAuthFiles(authID, u)
+	usageGo(func() { persistUsageToAuthFiles(authID, u) })
 }
 
 /* ------------------------------------------------- 用量 → 面板可见 label */
@@ -340,7 +340,7 @@ func handleQuotaFetch(req []byte) []byte {
 	noteUsage(authID, u, nil)
 	dbg("quota.fetch authID=%s remaining=%.1f%% reset=%s", authID, u.Percent, u.ResetDate)
 	// 实时查询也顺手刷新 auth 文件 label（面板列表可见）
-	go persistUsageToAuthFiles(authID, u)
+	usageGo(func() { persistUsageToAuthFiles(authID, u) })
 
 	resetTime := u.ResetDate
 	if u.ResetAt > 0 {

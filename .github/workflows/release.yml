@@ -84,9 +84,13 @@ jobs:
           ASSET="mimo_${VERSION}_${GOOS}_${GOARCH}.zip"
           mkdir -p dist/stage
           cp "dist/mimo.${EXT}" "dist/stage/mimo.${EXT}"
-          (cd dist/stage && zip -q "../${ASSET}" "mimo.${EXT}")
-          # 校验：zip 根目录有且只有那一个动态库
-          test "$(unzip -Z1 "dist/${ASSET}" | tr -d '\r')" = "mimo.${EXT}"
+          (cd dist/stage && if command -v zip >/dev/null 2>&1; then zip -q "../${ASSET}" "mimo.${EXT}"; else 7z a -tzip -bd "../${ASSET}" "mimo.${EXT}" >/dev/null; fi)
+          # 校验：zip 根目录有且只有那一个动态库（Windows runner 无 zip/unzip，用 7z）
+          if command -v unzip >/dev/null 2>&1; then
+            test "$(unzip -Z1 "dist/${ASSET}" | tr -d '\r')" = "mimo.${EXT}"
+          else
+            test "$(7z l -ba "dist/${ASSET}" | awk '{print $NF}' | tr -d '\r' | grep -xc "mimo.${EXT}")" = "1"
+          fi
           echo "ASSET=${ASSET}" >> "$GITHUB_ENV"
 
       - uses: actions/upload-artifact@v4
