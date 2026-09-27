@@ -286,6 +286,7 @@ func collectStatus() statusPayload {
 			"model_ttl":       c.ModelTTL,
 			"exclude_models":  c.ExcludeModels,
 			"log_to_host":     c.LogToHost,
+			"patch_panel":     patchPanelEnabled(),
 		},
 		Models:      modelsSnapshot(),
 		Credentials: credSnapshot(),

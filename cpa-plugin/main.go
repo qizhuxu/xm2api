@@ -33,7 +33,7 @@ import (
 
 const (
 	providerKey = "mimo"
-	pluginVer   = "0.1.0"
+	pluginVer   = "0.2.0"
 	pluginName  = "MiMo (Xiaomi MiMo Desktop SSO)"
 
 	defaultBase = "https://mimo-server-cn.xiaomimimo.com"
@@ -50,14 +50,18 @@ var pluginRepo = "https://github.com/qizhuxu/xm2api"
 // cfg 是 plugins.configs.mimo 下的插件自有配置。宿主只解析 enabled/priority，
 // 其余字段原样透传，所以这里全部可选、都有默认值。
 type cfg struct {
-	BaseURL       string      `yaml:"base_url"`
-	SID           string      `yaml:"sid"`
-	WebSearchAuto bool        `yaml:"web_search_auto"`
-	RefreshAfter  string      `yaml:"refresh_after"`
-	ModelTTL      string      `yaml:"model_ttl"`
-	ExcludeModels []string    `yaml:"exclude_models"`
-	LogToHost     bool        `yaml:"log_to_host"`
-	OTPAutoMail   *otpMailCfg `yaml:"otp_auto_mail"`
+	BaseURL       string   `yaml:"base_url"`
+	SID           string   `yaml:"sid"`
+	WebSearchAuto bool     `yaml:"web_search_auto"`
+	RefreshAfter  string   `yaml:"refresh_after"`
+	ModelTTL      string   `yaml:"model_ttl"`
+	ExcludeModels []string `yaml:"exclude_models"`
+	LogToHost     bool     `yaml:"log_to_host"`
+	// PatchPanel 面板补丁自动注入（默认开）：把 mimo-quota-patch 注入宿主的
+	// management.html，让 #/auth-files 额度带与 #/quota 额度卡在 Docker 等
+	// 手工不便的部署形态下也可用。false 关闭。
+	PatchPanel  *bool       `yaml:"patch_panel"`
+	OTPAutoMail *otpMailCfg `yaml:"otp_auto_mail"`
 }
 
 func defaultCfg() cfg {
@@ -86,6 +90,15 @@ func config() cfg {
 	mu.RLock()
 	defer mu.RUnlock()
 	return cur
+}
+
+// patchPanelEnabled 面板自动补丁开关（缺省 true）。
+func patchPanelEnabled() bool {
+	c := config()
+	if c.PatchPanel == nil {
+		return true
+	}
+	return *c.PatchPanel
 }
 
 func setConfig(c cfg) {
@@ -319,6 +332,7 @@ func dispatch(method string, req []byte) []byte {
 }
 
 func handleRegister(req []byte) []byte {
+	registerOnce.Do(startPanelPatch)
 	var in struct {
 		ConfigYAML    []byte `json:"config_yaml"`
 		SchemaVersion uint32 `json:"schema_version"`
@@ -346,6 +360,7 @@ func handleRegister(req []byte) []byte {
 				{"Name": "refresh_after", "Type": "string", "Description": "多久主动换一次 serviceToken，默认 6h"},
 				{"Name": "model_ttl", "Type": "string", "Description": "模型清单缓存时长，默认 10m"},
 				{"Name": "exclude_models", "Type": "array", "Description": "要从模型列表里隐藏的模型名，支持 * 通配。例如 [\"Doubao-*\"]。图像模型（Doubao-Seedream-5.0-pro）现已可经插件服务 /v1/images/generations，是否隐藏取决于客户端需求"},
+				{"Name": "patch_panel", "Type": "boolean", "Description": "面板补丁自动注入（默认 true）：把 #/auth-files 额度带与 #/quota 额度卡注入宿主 management.html；官方面板更新覆写后会自动重打。false 关闭"},
 				{"Name": "log_to_host", "Type": "boolean", "Description": "把插件事件写进宿主日志（启动 CPA 的终端）。默认关闭 —— 事件只进 %TEMP%/mimo-plugin.log 文件日志，不刷终端"},
 			},
 		},

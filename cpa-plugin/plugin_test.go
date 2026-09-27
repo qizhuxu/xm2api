@@ -198,7 +198,7 @@ func TestModelDiskCacheRecoversCatalog(t *testing.T) {
 	}
 
 	// 没凭证时（model.static 的场景）应当走磁盘缓存而不是硬编码兜底
-	got, source, _ := resolveModels("")
+	got, source, _ := resolveModels("", mimoCred{}, "")
 	if source != "disk" {
 		t.Fatalf("来源 = %q，期望 disk", source)
 	}
@@ -208,6 +208,151 @@ func TestModelDiskCacheRecoversCatalog(t *testing.T) {
 }
 
 /* ------------------------------------------------------------- 凭证 */
+
+// TestModelsRenewOn401 —— 模型目录拉取的反应式自救（v0.2.0）：
+// 凭证文件里的 serviceToken 过期 ⇒ 上游 401 ⇒ 用 pass_token 续期后重试。
+// 修复前模型路径缺这条：目录永远停在兜底两个模型（Linux 服务器实测）。
+func TestModelsRenewOn401(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		if strings.Contains(r.Header.Get("Cookie"), "serviceToken=newtok") {
+			_, _ = w.Write([]byte(`{"code":0,"data":{"models":[` +
+				`{"modelName":"mimo-v2.6-pro","modelType":"TEXT"},` +
+				`{"modelName":"mimo-v2.6-flash","modelType":"TEXT"},` +
+				`{"modelName":"mimo-v2.5-tts","modelType":"TTS"}]}}`))
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"code":401,"message":"token expired"}`))
+	}))
+	defer srv.Close()
+
+	oldCache := modelsCacheFile
+	modelsCacheFile = filepath.Join(t.TempDir(), "models.json")
+	defer func() { modelsCacheFile = oldCache }()
+	mu.Lock()
+	modelCache.at = time.Time{}
+	modelCache.models = nil
+	mu.Unlock()
+
+	oldRenew := renewForModels
+	defer func() { renewForModels = oldRenew }()
+	renewForModels = func(authID string, c *mimoCred) error {
+		c.ServiceToken = "newtok"
+		rememberCred(authID, *c)
+		invalidateModels()
+		return nil
+	}
+	setConfig(cfg{BaseURL: srv.URL, SID: "mimopc", RefreshAfter: "6h", ModelTTL: "10m"})
+	defer setConfig(defaultCfg())
+
+	cred := mimoCred{ServiceToken: "oldtok", UserID: "1", PassToken: "p"}
+	got, source, err := resolveModels("mimo-1", cred, cred.routeCookie())
+	if err != nil {
+		t.Fatalf("续期后重试应成功: %v", err)
+	}
+	if source != "upstream" {
+		t.Fatalf("来源 = %q，期望 upstream", source)
+	}
+	if len(got) != 3 {
+		t.Fatalf("拿到 %d 个模型，期望 3（不该退化成兜底两个）", len(got))
+	}
+	if hits != 2 {
+		t.Fatalf("上游被打了 %d 次，期望 2（401 + 续期后重试）", hits)
+	}
+}
+
+// TestModelsPreferFreshCred —— 模型拉取优先用内存里续期后的新 token：
+// 凭证文件（StorageJSON）还是旧值，credStore 里已有新值时不该拿旧值去 401。
+func TestModelsPreferFreshCred(t *testing.T) {
+	var gotCookie string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotCookie = r.Header.Get("Cookie")
+		_, _ = w.Write([]byte(`{"code":0,"data":{"models":[{"modelName":"mimo-v2.6-pro","modelType":"TEXT"}]}}`))
+	}))
+	defer srv.Close()
+
+	oldCache := modelsCacheFile
+	modelsCacheFile = filepath.Join(t.TempDir(), "models.json")
+	defer func() { modelsCacheFile = oldCache }()
+	mu.Lock()
+	modelCache.at = time.Time{}
+	modelCache.models = nil
+	mu.Unlock()
+	rememberCred("mimo-9", mimoCred{ServiceToken: "fresh", UserID: "9", PassToken: "p"})
+	setConfig(cfg{BaseURL: srv.URL, SID: "mimopc", RefreshAfter: "6h", ModelTTL: "10m"})
+	defer setConfig(defaultCfg())
+
+	req := mustJSON(map[string]any{
+		"AuthID":      "mimo-9",
+		"StorageJSON": []byte(`{"service_token":"stale","user_id":"9","pass_token":"p"}`),
+	})
+	handleModels(methodModelForAuth, req)
+	if !strings.Contains(gotCookie, "serviceToken=fresh") {
+		t.Fatalf("应优先用内存里的新 token，实际 Cookie = %q", gotCookie)
+	}
+}
+
+// TestPanelPatchInject —— 面板补丁自动注入：幂等、找得到 head/body 注入点、
+// 没有注入点的文件不崩不写。
+func TestPanelPatchInject(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "management.html")
+	src := "<html><head><title>x</title></head><body></body></html>"
+	if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ok, why := injectPanelPatch(p)
+	if !ok {
+		t.Fatalf("首次注入应成功: %s", why)
+	}
+	raw, _ := os.ReadFile(p)
+	html := string(raw)
+	if !strings.Contains(html, "__mimoQuotaPatch") {
+		t.Error("注入后应含版本标记 __mimoQuotaPatch")
+	}
+	if !strings.Contains(html, "data-mq-oauth") {
+		t.Error("注入的补丁应含 v7.7 的 OAuth 刷新按钮")
+	}
+	if !strings.HasPrefix(html[len("<html>"):], "<head>") {
+		t.Error("补丁应紧跟在 <head> 之后")
+	}
+	// 注入的是完整载荷（注释 + style + script）：注释必须自带收尾，
+	// 否则整页会被未闭合注释吞掉（v0.2.0 首版实测踩过）
+	if strings.Count(html, "MiMo quota patch for") != 1 {
+		t.Error("应恰有一个补丁注释头")
+	}
+	if !strings.Contains(html, "</style>") {
+		t.Error("补丁载荷应含 <style> 段")
+	}
+
+	if ok2, _ := injectPanelPatch(p); ok2 {
+		t.Error("重复注入应识别标记并跳过")
+	}
+
+	// 版本升级：文件里是旧版补丁 ⇒ 整块替换成新版
+	html = strings.Replace(html, "window.__mimoQuotaPatch='7.7'", "window.__mimoQuotaPatch='7.0'", 1)
+	_ = os.WriteFile(p, []byte(html), 0o644)
+	okUp, whyUp := injectPanelPatch(p)
+	if !okUp {
+		t.Fatalf("旧版补丁应被升级: %s", whyUp)
+	}
+	if raw3, _ := os.ReadFile(p); !strings.Contains(string(raw3), "window.__mimoQuotaPatch='7.7'") {
+		t.Error("升级后应是新版补丁")
+	}
+
+	// 无 head/body：不写、不崩
+	p2 := filepath.Join(dir, "plain.txt")
+	_ = os.WriteFile(p2, []byte("plain"), 0o644)
+	if ok3, _ := injectPanelPatch(p2); ok3 {
+		t.Error("无注入点的文件不该被写入")
+	}
+	if raw2, _ := os.ReadFile(p2); string(raw2) != "plain" {
+		t.Error("无注入点的文件内容不该变化")
+	}
+}
 
 func TestCredNormalizeFromCookie(t *testing.T) {
 	// 从 xm2api 的 sso-session.json 迁移过来的写法
