@@ -32,6 +32,33 @@ server:
   # 环境变量：XM2API_UPSTREAM_TIMEOUT_MS
   upstreamTimeoutMs: 300000
 
+  # 管理密钥（前端管理界面 /ui/ 登录、X-Management-Key 请求头）。
+  # 优先级：env XM2API_ADMIN_KEY > 下面这行 > data/admin-key.txt（首启自动生成）。
+  # ⚠️ 想固定密钥优先用环境变量；写进本文件请勿把本文件提交到公开仓库。
+  # adminKey: "在这里填你的管理密钥"
+
+  # 安全护栏白名单（见 lib/admin.mjs）：
+  #   allowedHosts   允许的 Host 头（默认只认本机回环，防 DNS rebinding）；
+  #                  Docker / 反代 / 自建域名场景按 host:port 精确加白，如
+  #                  ["myserver.com:8080"]；"%" 开头可作前缀通配（如 ["%:8080"]）；
+  #                  ⚠️ "*" 放开全部（仅建议内网/容器网桥场景）
+  #   allowedOrigins 允许的跨站 Origin（默认只认同源）；同上支持 "*" 通配
+  # 环境变量：XM2API_ALLOWED_HOSTS / XM2API_ALLOWED_ORIGINS（逗号分隔）
+  allowedHosts: []
+  allowedOrigins: []
+
+  # —— 账号池与自动续期（二期）——
+  # 转发从 data/accounts/ round-robin 选号；坏号（401/403）冷却 cooldownMs 并换号；
+  # 池空/关闭 ⇒ 回落 sso-session 单会话。
+  pool:
+    enabled: true
+    strategy: round-robin
+    cooldownMs: 300000
+  # 转发 401 自动续期：pass_token 续期→原号重试，失败换号；只回马一次；流式不重试
+  autoRenew: true
+  # 定时兜底续期（毫秒，0=纯 401 事件驱动）
+  refreshAfterMs: 21600000
+
   # 请求体兼容层。反代默认逐字节透传，只有命中下面规则才会改写。
   compat:
     # ① 翻译档：上游只认 tools:[{type:"web_search"}] 才会联网；写 web_search:{enable:true}、
