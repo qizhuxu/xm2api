@@ -563,6 +563,24 @@ netstat -ano | findstr :18787
 
 ---
 
+## Docker 部署
+
+```powershell
+docker compose up -d        # 或 docker build -t xm2api . 后按 Dockerfile 注释运行
+# SDK:      http://<host>:18787/v1
+# 管理界面:  http://<host>:18787/ui/ （管理密钥见 data/admin-key.txt）
+```
+
+- 镜像由 GitHub Actions 构建推送 GHCR（`.github/workflows/docker.yml`，打 `v*` tag 触发）：
+  `ghcr.io/<owner>/<repo>:<version|latest>`；
+- 卷挂载：`./data`（凭证/账号池/管理密钥/用量）、`./config.yaml`、`./logs`；
+- ⚠️ 容器里 Host 头是 `<host>:<映射端口>`，安全护栏要加白 —— `docker-compose.yml`
+  默认 `XM2API_ALLOWED_HOSTS: "%:18787"`（`%` 为后缀通配；改映射端口要同步）；对公网
+  开放前固定强管理密钥（`XM2API_ADMIN_KEY`）。管理密钥也可用 `config.yaml` 的
+  `server.adminKey` 控制（优先级：env > config > `data/admin-key.txt` 自动生成）；
+- 容器里没有 MiMo 桌面客户端，「本机一键提取」不可用 —— 用管理界面**在线登录**
+  （扫码/密码/OTP）或导入 `mimo.json` 灌凭证。
+
 ## ⚠️ 安全
 
 1. **服务没有鉴权**，默认只绑 `127.0.0.1`。不要改成 `0.0.0.0` 暴露公网；

@@ -1,0 +1,18 @@
+# 构建上下文只留运行所需（凭证/日志/测试/归档一律不进镜像）
+.git
+.github
+jiu
+data
+logs
+backups
+test
+docs
+examples
+cpa-plugin
+node_modules
+*.md
+*.log
+*.bat
+.gitignore
+.gitattributes
+docker-compose.yml

@@ -1,0 +1,24 @@
+# xm2api 容器部署：docker compose up -d
+#
+# 访问：http://<host>:18787/v1（SDK）与 http://<host>:18787/ui/（管理界面）
+# ⚠️ 安全护栏：容器里 Host 头是 <host>:<映射端口>，必须加白（见 XM2API_ALLOWED_HOSTS）；
+#    对公网开放前请固定强管理密钥（XM2API_ADMIN_KEY）。
+services:
+  xm2api:
+    build: .
+    # 用 GitHub Actions 构建的镜像（ghcr.io/<owner>/<repo>）：
+    # image: ghcr.io/your-org/xm2api:latest
+    ports:
+      - "18787:18787"
+    environment:
+      XM2API_HOST: 0.0.0.0
+      # 按实际访问地址加白 Host："%" 为后缀通配；改了映射端口要同步（如 %:8080）。
+      # ⚠️ "*" = 放开全部 Host，仅建议内网/容器网桥场景。
+      XM2API_ALLOWED_HOSTS: "%:18787"
+      # 管理密钥：不设则首启自动生成到 data/admin-key.txt；生产建议固定强密钥：
+      # XM2API_ADMIN_KEY: "换成强密钥"
+    volumes:
+      - ./data:/app/data            # 凭证 / 账号池 / 管理密钥 / 用量数据
+      - ./config.yaml:/app/config.yaml:ro
+      - ./logs:/app/logs
+    restart: unless-stopped
