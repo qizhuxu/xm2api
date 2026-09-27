@@ -376,6 +376,55 @@ $env:MIMO_PLUGIN_DEBUG = "1"    # 启动 CPA 前设置
 
 ## 8. 发布到插件商店
 
+### 8.1 上传 GitHub 后构建发布（对齐官方指导）
+
+依据官方 [插件开发文档](https://help.router-for.me/cn/plugin/development)「插件商店发布格式」，
+本仓库 `.github/workflows/release.yml` 已按官方要求实现：
+
+1. **推送仓库到 GitHub** —— `repository` 即官方 registry 要求的 `https://github.com/{owner}/{repo}`；
+2. **打 tag 触发构建**：`git tag v0.2.0 && git push --tags` → CI 跑单测 + 交叉编译 5 平台
+   （linux amd64/arm64、darwin amd64/arm64、windows amd64）+ 发布 GitHub Release，产物**逐字符合规**：
+
+   ```
+   mimo_<version>_<goos>_<goarch>.zip     # zip 根目录直接放 mimo.{dll,so,dylib}，不能套子目录
+   checksums.txt                          # 每行 "<sha256>  <zip名>"（官方安装时逐个校验）
+   ```
+
+   版本以 **release tag** 为准（可带 `v`，宿主安装时去掉前导 `v` 校验）；
+3. **元数据注入**：CI 用 `-X main.pluginRepo=https://github.com/<owner>/<repo>` 写入
+   `plugin.register` 的 `GitHubRepository`；本地构建用
+   `make build PLUGIN_REPO=https://github.com/you/your-repo` 覆盖占位值；
+4. **提交官方插件商店**：给
+   [router-for-me/CLIProxyAPI-Plugins-Store](https://github.com/router-for-me/CLIProxyAPI-Plugins-Store)
+   的 `registry.json` 提 PR（`id/name/description/author/repository` 必填）：
+
+   ```json
+   {
+     "id": "mimo",
+     "name": "MiMo (Xiaomi MiMo Desktop SSO)",
+     "description": "把小米 MiMo SSO 会话接入 CLIProxyAPI：模型发现、凭证续期、聊天/图像执行。",
+     "author": "xm2api",
+     "version": "0.2.0",
+     "repository": "https://github.com/<owner>/<repo>",
+     "logo": "",
+     "license": "MIT",
+     "tags": ["provider"]
+   }
+   ```
+
+   自建第三方 registry 亦可：`plugins.store-sources` 追加自己的 `registry.json` URL；
+5. **安装验证**（管理密钥）：
+
+   ```bash
+   curl -H "X-Management-Key: <key>"  http://server:8317/v0/management/plugin-store
+   curl -X POST -H "X-Management-Key: <key>"  http://server:8317/v0/management/plugin-store/mimo/install
+   ```
+
+   宿主下载资产 → 校验 `checksums.txt` → 定向卸载旧版 → 覆写动态库 → 热重载；
+   Windows 动态库被占用时返回「需要重启」冲突响应（正常现象）。
+
+### 8.2 商店安装机制备忘
+
 插件商店只维护一个 `registry.json`，二进制放作者自己的 GitHub Releases。要求：
 
 - tag 形如 `v0.1.0`

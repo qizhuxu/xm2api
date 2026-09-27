@@ -63,7 +63,8 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: |
           mkdir -p dist
-          go build -buildmode=c-shared -trimpath -ldflags "-s -w" \
+          go build -buildmode=c-shared -trimpath \
+            -ldflags "-s -w -X main.pluginRepo=https://github.com/${{ github.repository }}" \
             -o "dist/mimo.${{ matrix.ext }}" .
 
       - name: 打包（zip 根目录只放动态库）

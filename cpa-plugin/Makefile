@@ -6,6 +6,10 @@ PLUGIN_ID := mimo
 VERSION   ?= 0.1.0
 GOOS      ?= $(shell go env GOOS)
 GOARCH    ?= $(shell go env GOARCH)
+# 插件元数据里的仓库地址（官方插件商店 registry 要求 github.com/{owner}/{repo}）；
+# CI 用 -X main.pluginRepo=https://github.com/<owner>/<repo> 注入真实值，
+# 本地构建可用 make build PLUGIN_REPO=... 覆盖占位值
+PLUGIN_REPO ?= https://github.com/your-org/xm2api
 
 # 动态库后缀按平台走，与 CPA loader 的约定一致
 EXT_linux   := so
@@ -27,7 +31,7 @@ all: build
 ## 编译出当前平台的动态库
 build:
 	@mkdir -p $(DIST)
-	go build -buildmode=c-shared -trimpath -ldflags "-s -w" -o $(LIB) .
+	go build -buildmode=c-shared -trimpath -ldflags "-s -w -X main.pluginRepo=$(PLUGIN_REPO)" -o $(LIB) .
 	@echo "built $(LIB)"
 
 ## 单元测试（不需要网络和凭证）
