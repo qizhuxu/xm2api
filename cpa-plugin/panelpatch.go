@@ -27,6 +27,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -193,20 +194,44 @@ func patchPanelOnce() bool {
 	return hit
 }
 
-// startPanelPatch 启动时打一次，之后每 10 分钟重检一次：
-// 官方面板的 asset auto-updater 会按 GitHub digest 覆写 management.html，
-// 覆写后补丁标记消失，下一轮重检自动重打（无需重启）。
+// startPanelPatch 启动梯次重打 + 高频巡检：
+//
+// 官方面板的 asset auto-updater 会周期性按 GitHub digest 覆写 management.html
+// （实测启动后 15s 内、以及分钟级反复覆写；配置
+// remote-management.disable-auto-update-panel: true 可根治但那是宿主配置）。
+// 在不动宿主配置的前提下把重打节奏提到「启动 0/3/10/30s 梯次 + 之后每 30s」，
+// 让补丁空窗压到秒级；管理流量进来时也会顺手保活（ensurePanelPatched 节流）。
 func startPanelPatch() {
 	if !patchPanelEnabled() {
 		dbg("面板自动补丁已按配置关闭（patch_panel: false）")
 		return
 	}
 	go func() {
-		patchPanelOnce()
-		t := time.NewTicker(10 * time.Minute)
+		for _, d := range []time.Duration{0, 3 * time.Second, 10 * time.Second, 30 * time.Second} {
+			if d > 0 {
+				time.Sleep(d)
+			}
+			patchPanelOnce()
+		}
+		t := time.NewTicker(30 * time.Second)
 		defer t.Stop()
 		for range t.C {
 			patchPanelOnce()
 		}
 	}()
+}
+
+// ensurePanelPatched 管理流量顺手保活（节流 5s：marker 检查要读 2.7MB 面板文件）。
+var lastEnsure atomic.Int64
+
+func ensurePanelPatched() {
+	if !patchPanelEnabled() {
+		return
+	}
+	now := time.Now().UnixMilli()
+	if now-lastEnsure.Load() < 5000 {
+		return
+	}
+	lastEnsure.Store(now)
+	patchPanelOnce()
 }

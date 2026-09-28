@@ -94,6 +94,7 @@ func handleManagement(req []byte) []byte {
 	}
 	_ = json.Unmarshal(req, &in)
 	dbg("management.handle %s %s", in.Method, in.Path)
+	ensurePanelPatched() /* 管理流量顺手保活面板补丁（updater 会周期覆写，节流 5s） */
 
 	// ---- 资源路由（无管理鉴权）：登录页 / 会话状态轮询 / 账号密码登录 ----
 	// 只输出非敏感信息；qr/lp/loginUrl 等凭证等价物绝不出现，密码绝不回显。

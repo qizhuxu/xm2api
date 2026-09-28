@@ -3,7 +3,7 @@
 # Windows 上如果没有 make，直接看 README 里的 PowerShell 等价命令。
 
 PLUGIN_ID := mimo
-VERSION   ?= 0.4.0
+VERSION   ?= 0.4.1
 GOOS      ?= $(shell go env GOOS)
 GOARCH    ?= $(shell go env GOARCH)
 # 插件元数据里的仓库地址（官方插件商店 registry 要求 github.com/{owner}/{repo}）；
@@ -65,5 +65,6 @@ package: build
 ## 看看有哪些目标
 list:
 	@grep -E '^## ' $(MAKEFILE_LIST) | sed 's/## /  /'
+
 
 

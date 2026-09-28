@@ -33,7 +33,7 @@ import (
 
 const (
 	providerKey = "mimo"
-	pluginVer   = "0.4.0"
+	pluginVer   = "0.4.1"
 	pluginName  = "MiMo (Xiaomi MiMo Desktop SSO)"
 
 	defaultBase = "https://mimo-server-cn.xiaomimimo.com"
