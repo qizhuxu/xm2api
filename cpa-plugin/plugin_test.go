@@ -314,7 +314,7 @@ func TestPanelPatchInject(t *testing.T) {
 		t.Error("注入后应含版本标记 __mimoQuotaPatch")
 	}
 	if !strings.Contains(html, "data-mq-oauth") {
-		t.Error("注入的补丁应含 v7.7 的 OAuth 刷新按钮")
+		t.Error("注入的补丁应含 OAuth 刷新图标按钮（data-mq-oauth）")
 	}
 	if !strings.HasPrefix(html[len("<html>"):], "<head>") {
 		t.Error("补丁应紧跟在 <head> 之后")
@@ -332,14 +332,16 @@ func TestPanelPatchInject(t *testing.T) {
 		t.Error("重复注入应识别标记并跳过")
 	}
 
-	// 版本升级：文件里是旧版补丁 ⇒ 整块替换成新版
-	html = strings.Replace(html, "window.__mimoQuotaPatch='7.7'", "window.__mimoQuotaPatch='7.0'", 1)
+	// 版本升级：文件里是旧版补丁 ⇒ 整块替换成新版（版本号动态取自载荷，
+	// 不硬编码 —— 补丁每次升版都要能测到升级路径）
+	curMark := "window.__mimoQuotaPatch=" + patchVersion()
+	html = strings.Replace(html, curMark, "window.__mimoQuotaPatch='7.0'", 1)
 	_ = os.WriteFile(p, []byte(html), 0o644)
 	okUp, whyUp := injectPanelPatch(p)
 	if !okUp {
 		t.Fatalf("旧版补丁应被升级: %s", whyUp)
 	}
-	if raw3, _ := os.ReadFile(p); !strings.Contains(string(raw3), "window.__mimoQuotaPatch='7.7'") {
+	if raw3, _ := os.ReadFile(p); !strings.Contains(string(raw3), curMark) {
 		t.Error("升级后应是新版补丁")
 	}
 

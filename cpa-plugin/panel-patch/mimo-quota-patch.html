@@ -24,6 +24,17 @@
       d) v7.5 的开关联动/禁用隐藏逻辑原样保留；#/auth-files 的额度区不受影响
          （它本来就已是「点击此处刷新额度」的默认态，用 AuthFileQuota-module
          类体系是该页官方原生 DOM，无需改动）。
+  v7.8（「刷新 OAuth 凭证」对齐官方实现，不重复造轮子）：
+  R15 v7.7 在额度带里自造了文字按钮，与官方不一致（用户对照截图指出）：
+      官方按钮是 footer utilityActions 首位（「模型」与「下载」之间）的
+      **图标按钮** —— btn btn-secondary btn-sm + AuthFileCard-module__iconButton
+      类 + RotateCw 图标（bundle 实测 Cs 组件两段 path）+ title 悬浮提示
+      「刷新 OAuth 凭证」+ pending 时 spinner（Loader2）与禁用。本版改为：
+      a) 同位置注入与官方逐字同款的图标按钮；图标/类名优先从页面上官方按钮
+         克隆（antigravity 卡上有现成的），克隆不到用 bundle 实测的官方 SVG
+         兜底；点击走宿主官方端点 auth-files/refresh，pending 态 spinner+禁用，
+         悬浮提示反馈（刷新中…/已提交刷新请求/刷新失败），完成后顺手刷额度带；
+      b) 撤掉 v7.7 额度带里的自造文字按钮。
   v7.7（mimo 卡补「刷新 OAuth 凭证」按钮）：
   R14 官方面板的手动刷新按钮只渲染内置 6 家（bundle 实测门槛是硬编码
       Set{meta,antigravity,claude,codex,kimi,xai}，两版面板都不含插件
@@ -221,7 +232,7 @@ article[data-mq-hidden="1"]{display:none !important}
 <script>
 /* MiMo quota patch v7.6 — 见文件头注释。密钥只驻留内存变量，不落盘、不外发。 */
 (function(){
-  if(window.__mimoQuotaPatch) return; window.__mimoQuotaPatch='7.7';
+  if(window.__mimoQuotaPatch) return; window.__mimoQuotaPatch='7.8';
 
   /* ================= 1. 会话密钥自动捕获（先于面板 bundle 执行） ================= */
   var KEY_EVT='mimo-key-captured';
@@ -630,12 +641,10 @@ article[data-mq-hidden="1"]{display:none !important}
     });
     return h;
   }
-  function idleHtml(){ var C=authCls(); return '<button type="button" class="'+C.quotaMessage+' '+C.quotaMessageAction+'" data-mq-refresh>'+T.idle+'</button>'+
-    '<button type="button" class="'+C.quotaMessage+' '+C.quotaMessageAction+'" data-mq-oauth>'+T.oauthBtn+'</button>'; }
+  function idleHtml(){ var C=authCls(); return '<button type="button" class="'+C.quotaMessage+' '+C.quotaMessageAction+'" data-mq-refresh>'+T.idle+'</button>'; }
   function loadingHtml(){ var C=authCls(); return '<div class="'+C.quotaMessage+'">'+T.loading+'</div>'; }
   function errorHtml(msg){ var C=authCls(); return '<div class="'+C.quotaError+'">'+T.loadFailed+esc(msg)+'</div>'; }
-  function actionsHtml(){ var C=authCls(); return '<div class="'+C.quotaCardActions+'"><button type="button" class="'+C.quotaMessage+' '+C.quotaMessageAction+'" data-mq-refresh>'+T.refreshBtn+'</button>'+
-    '<button type="button" class="'+C.quotaMessage+' '+C.quotaMessageAction+'" data-mq-oauth>'+T.oauthBtn+'</button></div>'; }
+  function actionsHtml(){ var C=authCls(); return '<div class="'+C.quotaCardActions+'"><button type="button" class="'+C.quotaMessage+' '+C.quotaMessageAction+'" data-mq-refresh>'+T.refreshBtn+'</button></div>'; }
 
   /* ---- v7.6：#/quota 卡片各状态的 body（QuotaCard-module 官方原语） ---- */
   function qIdleHtml(){
@@ -839,18 +848,54 @@ article[data-mq-hidden="1"]{display:none !important}
     for(var i=0;i<bs.length;i++){
       bs[i].onclick=function(ev){ if(ev&&ev.preventDefault) ev.preventDefault(); doInline(sec,name); };
     }
-    var os=sec.querySelectorAll('[data-mq-oauth]');
-    for(var j=0;j<os.length;j++){
-      os[j].onclick=function(ev){ if(ev&&ev.preventDefault) ev.preventDefault(); doOAuthRefresh(sec,name); };
-    }
   }
-  /* v7.7：手动 OAuth 续期 —— 走宿主官方端点 auth-files/refresh（官方面板的手动
-     刷新按钮同款），由宿主调插件 auth.refresh 真实换发 serviceToken。 */
-  async function doOAuthRefresh(sec,name){
+  /* v7.8：官方同款「刷新 OAuth 凭证」图标按钮（footer utilityActions 首位，
+     「模型」与「下载」之间）。官方面板只对内置 6 家渲染该按钮（bundle 实测
+     门槛 Set{meta,antigravity,claude,codex,kimi,xai}），这里给 mimo 补同款：
+     图标与类名**优先从页面上的官方按钮克隆**（不重复造轮子），克隆不到时用
+     bundle 实测的官方 SVG 兜底（Cs=RotateCw 两段 path；spinner=Loader2）。 */
+  var OFFICIAL_REFRESH_SVG='<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>';
+  var OFFICIAL_SPINNER_SVG='<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>';
+  function iconBtnClass(){
+    var b=document.querySelector('button[class*="iconButton"]');
+    if(b){ var m=String(b.className).match(/[\w-]*iconButton[\w-]*/); if(m) return m[0]; }
+    var sheets=document.styleSheets||[];
+    for(var i=0;i<sheets.length;i++){
+      var rules; try{ rules=sheets[i].cssRules; }catch(e){ continue; }
+      for(var j=0;j<rules.length;j++){
+        var sel=(rules[j]&&rules[j].selectorText)||'';
+        var m2=sel.match(/\.([\w-]*iconButton[\w-]*)/);
+        if(m2 && /AuthFileCard/.test(sel)) return m2[1];
+      }
+    }
+    return 'AuthFileCard-module__iconButton___XdMXe'; /* bundle 实测类名（构建变体不同则走上两级发现） */
+  }
+  function injectFooterOAuth(card,name,sec){
+    var ua=card.querySelector('div[class*="utilityActions"]');
+    if(!ua || ua.querySelector('[data-mq-oauth]')) return;
+    var tpl=document.querySelector('button[class*="iconButton"][title*="刷新 OAuth"]');
+    var btn;
+    if(tpl){
+      btn=tpl.cloneNode(true);          /* 官方按钮整颗克隆：类名/图标/尺寸逐字一致 */
+      btn.onclick=null;
+    }else{
+      btn=document.createElement('button');
+      btn.type='button';
+      btn.className='btn btn-secondary btn-sm '+iconBtnClass();
+      btn.innerHTML=OFFICIAL_REFRESH_SVG;
+    }
+    btn.title=T.oauthBtn;
+    btn.setAttribute('data-mq-oauth','1');
+    btn.onclick=function(ev){ if(ev&&ev.preventDefault) ev.preventDefault(); doOAuthRefresh(card,name,btn,sec); };
+    ua.insertBefore(btn,ua.firstChild);
+  }
+  async function doOAuthRefresh(card,name,btn,sec){
     var key=findKey();
-    if(!key){ sec.innerHTML=errorHtml('正在等待面板会话密钥…（硬刷新一次即可）')+idleHtml(); bindSec(sec,name); return; }
-    var btn=sec.querySelector('[data-mq-oauth]');
-    if(btn){ btn.disabled=true; btn.textContent=T.oauthPending; }
+    if(!key){ btn.title='正在等待面板会话密钥…（硬刷新一次即可）'; return; }
+    var origHtml=btn.innerHTML, origTitle=btn.title;
+    btn.disabled=true;
+    btn.innerHTML=OFFICIAL_SPINNER_SVG;
+    btn.title=T.oauthPending;
     try{
       var files=await mimoAuthFiles(key);
       var f=pickEntry(files,name);
@@ -861,14 +906,16 @@ article[data-mq-hidden="1"]{display:none !important}
       var j=null; try{ j=await r.json(); }catch(e2){ j=null; }
       if(!r.ok) throw new Error('HTTP '+r.status);
       if(j&&j.__error) throw new Error(j.__error);
-      if(btn){ btn.textContent=T.oauthOK; }
+      btn.title=T.oauthOK;
     }catch(e){
-      if(btn){ btn.textContent=T.oauthFail+'：'+(e.message||e); }
+      btn.title=T.oauthFail+'：'+(e.message||e);
     }
     setTimeout(function(){
-      /* 续期成功后顺手刷一次额度；失败也恢复按钮 */
-      doInline(sec,name);
-    },1200);
+      btn.innerHTML=origHtml;
+      btn.title=origTitle||T.oauthBtn;
+      btn.disabled=false;
+      if(sec&&document.body.contains(sec)) doInline(sec,name); /* 续期后顺手刷额度带 */
+    },3000);
   }
   async function doInline(sec,name){
     var key=findKey();
@@ -930,6 +977,7 @@ article[data-mq-hidden="1"]{display:none !important}
       var footer=a.querySelector('footer');
       if(footer) a.insertBefore(sec,footer); else a.appendChild(sec);
       bindSec(sec,name);
+      injectFooterOAuth(a,name,sec); /* v7.8：官方同款图标按钮进 footer */
     }
   }
   function purgeAll(){

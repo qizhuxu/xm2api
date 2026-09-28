@@ -624,6 +624,14 @@ CPA 升级后需重验。不想用图像时依旧可用 `exclude_models: ["Douba
      **前置**：config `remote-management.disable-auto-update-panel: true`
      （否则 updater 按 GitHub digest 覆写本地面板，实测源码
      `managementasset/updater.go:117,280`）。
+     **补丁 v7.8（「刷新 OAuth 凭证」对齐官方实现）**：v7.7 曾在额度带自造
+     文字按钮，与官方不一致。官方按钮是 footer `utilityActions` 首位（「模型」
+     与「下载」之间）的**图标按钮**（`btn btn-secondary btn-sm` +
+     `AuthFileCard-module__iconButton` 类 + RotateCw 图标 + title 悬浮提示 +
+     pending spinner/禁用）。v7.8 同位置注入**官方逐字同款**按钮：图标与类名
+     优先从页面上官方按钮整颗克隆（不重复造轮子），克隆不到用 bundle 实测的
+     官方 SVG 兜底；点击走 `POST /v0/management/auth-files/refresh`，悬浮提示
+     反馈（刷新中…/已提交刷新请求/刷新失败），完成后顺手刷新额度带。
      **补丁 v7.7（mimo 卡补「刷新 OAuth 凭证」按钮）**：官方面板的手动刷新按钮
      只渲染内置 6 家（bundle 实测门槛 `Set{meta,antigravity,claude,codex,kimi,xai}`，
      两版面板都不含插件 provider）⇒ mimo 卡永远没有该按钮。补丁自己补一个
@@ -656,14 +664,16 @@ CPA 升级后需重验。不想用图像时依旧可用 `exclude_models: ["Douba
 - **默认关闭**：`plugins.configs.mimo.standalone_panel: true` 才在官方面板侧边栏
   挂「MiMo 面板」菜单、才响应页面（404 引导）；也可热重载开启：
   `PATCH /v0/management/plugins/mimo/config` body `{"standalone_panel":true}`；
-- **功能对标 Node 版管理界面**：
-  - 仪表盘：KPI（账号数/可用/模型数/平均额度/今日请求）+ **额度趋势折线** +
-    **近 30 天请求量柱状**（手写 SVG，深浅色）；
-  - 账号管理：启停 / 删除 / **刷新额度** / **刷新 OAuth 续期**（宿主官方端点）/
-    模型清单；
-  - 额度：每账号环形百分比卡 + 重置日期 + 手动刷新；
-  - 在线登录：创建登录会话（复用登录页：扫码/账号密码/新设备 OTP），成功自动入库；
+- **功能对标 Node 版管理界面**（v0.4.0 起**单页全信息**：总览/用量/账号/模型
+  一屏到底，不再分标签页）：
+  - 总览：KPI（账号数/可用/模型数/平均额度/今日请求）；
+  - 用量：**额度趋势折线** + **近 30 天请求量柱状**（手写 SVG，悬浮明细）；
+  - 账号：每卡管理+额度一体（环形百分比/重置日期/**刷新额度**/**刷新 OAuth
+    续期**/启停/删除/模型），并含**在线登录**（扫码/账号密码/新设备 OTP）；
   - 模型：目录来源与数量（cache/upstream/fallback 可见）；
+- **风格与官方面板一致**：页面加载时用同源隐藏 iframe 跑一遍官方面板，把其
+  运行时注入的 CSS **原样克隆**（不重复造轮子；失败时有兜底样式），
+  按钮/卡片用官方全局类名体系；
 - **密钥保护**：与官方面板同源时自动带出 `localStorage.managementKey`，
   否则输入一次（只存 sessionStorage）；
 - 数据端点：`/plugins/mimo/usage/history`（额度历史，10 分钟节流每凭证 500 点）、
